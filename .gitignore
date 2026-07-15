@@ -25,3 +25,4 @@ frontend/.vite/
 
 # Docker volumes (if bind-mounted locally)
 pgdata/
+.env
