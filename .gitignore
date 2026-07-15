@@ -1,5 +1,27 @@
 .env
+.env.*
+!.env.example
 node_modules/
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Frontend
+frontend/dist/
+frontend/.vite/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Docker volumes (if bind-mounted locally)
+pgdata/
