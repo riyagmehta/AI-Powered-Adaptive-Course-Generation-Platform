@@ -28,13 +28,18 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
-    openai_chat_model: str = "gpt-4"
-    openai_embedding_model: str = "text-embedding-ada-002"
+    openai_chat_model: str = "gpt-4o-mini"
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_embedding_dimensions: int = 1536
 
     # Pinecone
     pinecone_api_key: str = ""
     pinecone_environment: str = ""
     pinecone_index_name: str = "course-platform"
+
+    # Doubt resolver
+    doubt_cache_ttl_seconds: int = 3600
+    doubt_retrieval_top_k: int = 5
 
 
 settings = Settings()

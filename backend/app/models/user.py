@@ -33,3 +33,6 @@ class User(Base):
     quiz_attempts: Mapped[list["QuizAttempt"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    doubts: Mapped[list["Doubt"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
