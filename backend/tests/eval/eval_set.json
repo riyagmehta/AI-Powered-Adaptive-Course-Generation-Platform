@@ -1,0 +1,147 @@
+{
+  "corpus_topic": "Distributed Systems Fundamentals",
+  "in_scope": [
+    {
+      "question": "What is a distributed system?",
+      "module_index": 0,
+      "expected_excerpt": "A distributed system is a collection of independent computers that appears to its users as a single coherent system."
+    },
+    {
+      "question": "What are the key characteristics of distributed systems?",
+      "module_index": 0,
+      "expected_excerpt": "Key characteristics include concurrency, scalability, fault tolerance, heterogeneity, and transparency."
+    },
+    {
+      "question": "What is one motivation for using distributed systems?",
+      "module_index": 0,
+      "expected_excerpt": "Distributed systems allow multiple users to share resources such as files, processors, and printers, leading to improved utilization."
+    },
+    {
+      "question": "What is a challenge faced by distributed systems?",
+      "module_index": 0,
+      "expected_excerpt": "Ensuring that all nodes have a consistent view of the data is challenging, especially in the presence of concurrent updates."
+    },
+    {
+      "question": "How can distributed systems enhance performance?",
+      "module_index": 0,
+      "expected_excerpt": "Distributing workloads across multiple nodes can enhance performance by minimizing bottlenecks and enabling parallel processing."
+    },
+    {
+      "question": "What is eventual consistency?",
+      "module_index": 1,
+      "expected_excerpt": "Eventual consistency is a model where updates to a distributed system will eventually propagate to all nodes, but not necessarily immediately."
+    },
+    {
+      "question": "What are the characteristics of strong consistency?",
+      "module_index": 1,
+      "expected_excerpt": "Strong consistency ensures that all nodes in a distributed system reflect the most recent write at any point in time."
+    },
+    {
+      "question": "What challenges are associated with eventual consistency?",
+      "module_index": 1,
+      "expected_excerpt": "Users may be confused by seeing outdated information."
+    },
+    {
+      "question": "How does strong consistency affect user experience?",
+      "module_index": 1,
+      "expected_excerpt": "Users always see the most recent data after a successful write operation."
+    },
+    {
+      "question": "What is one of the main benefits of data replication?",
+      "module_index": 2,
+      "expected_excerpt": "Replication helps in maintaining data availability in case of node failures."
+    },
+    {
+      "question": "What defines synchronous replication?",
+      "module_index": 2,
+      "expected_excerpt": "In synchronous replication, data is written to multiple nodes simultaneously."
+    },
+    {
+      "question": "What is a disadvantage of synchronous replication?",
+      "module_index": 2,
+      "expected_excerpt": "Write operations can be slow due to the need for multiple acknowledgments."
+    },
+    {
+      "question": "What should be considered when choosing a replication strategy?",
+      "module_index": 2,
+      "expected_excerpt": "Determine if your application can tolerate eventual consistency."
+    },
+    {
+      "question": "What does fault tolerance refer to?",
+      "module_index": 3,
+      "expected_excerpt": "Fault tolerance refers to the capability of a system to continue operating correctly even when one or more components fail."
+    },
+    {
+      "question": "What are the types of redundancy mentioned?",
+      "module_index": 3,
+      "expected_excerpt": "Redundancy is a primary mechanism for achieving fault tolerance. It involves duplicating components or data to ensure that if one part fails, another can take over."
+    },
+    {
+      "question": "What is checkpointing?",
+      "module_index": 3,
+      "expected_excerpt": "Checkpointing involves saving the state of a system at certain intervals."
+    },
+    {
+      "question": "What are recovery protocols?",
+      "module_index": 3,
+      "expected_excerpt": "Recovery protocols are strategies used to restore a system to a functional state after a failure."
+    },
+    {
+      "question": "What is the purpose of logging in recovery protocols?",
+      "module_index": 3,
+      "expected_excerpt": "Maintain logs of operations that can be replayed during recovery."
+    },
+    {
+      "question": "What is the process through which a group of nodes in a distributed system agrees on a single value?",
+      "module_index": 4,
+      "expected_excerpt": "Consensus is the process through which a group of nodes in a distributed system agrees on a single value or state, even in the presence of failures."
+    },
+    {
+      "question": "In which systems is Raft employed?",
+      "module_index": 4,
+      "expected_excerpt": "Employed in systems like etcd and HashiCorp Consul, which are used for service discovery and configuration management."
+    },
+    {
+      "question": "What happens in the Prepare Phase of the Paxos algorithm?",
+      "module_index": 4,
+      "expected_excerpt": "A proposer selects a proposal number `n` and sends a `prepare` request to a majority of acceptors."
+    },
+    {
+      "question": "What is the architecture of Apache Cassandra based on?",
+      "module_index": 5,
+      "expected_excerpt": "Its architecture is based on a peer-to-peer model, which enhances fault tolerance and scalability."
+    },
+    {
+      "question": "What does Google Spanner use to manage distributed timestamps?",
+      "module_index": 5,
+      "expected_excerpt": "Spanner uses the TrueTime API to manage distributed timestamps, ensuring that transactions are executed with strong consistency guarantees, even in a distributed environment."
+    },
+    {
+      "question": "What feature does Amazon DynamoDB support for disaster recovery?",
+      "module_index": 5,
+      "expected_excerpt": "DynamoDB supports multi-region replication, allowing data to be stored in multiple locations for disaster recovery and low-latency access."
+    },
+    {
+      "question": "What does Kubernetes do to ensure availability when a container fails?",
+      "module_index": 5,
+      "expected_excerpt": "Kubernetes automatically restarts failed containers and can reschedule them on healthy nodes, ensuring availability."
+    }
+  ],
+  "out_of_scope": [
+    {
+      "question": "What's the best way to caramelize onions without burning them?"
+    },
+    {
+      "question": "Who won the FIFA World Cup in 1998?"
+    },
+    {
+      "question": "What are the main symptoms of seasonal allergies?"
+    },
+    {
+      "question": "How do I convert a PDF file into an editable Word document?"
+    },
+    {
+      "question": "What's a good beginner workout routine for building upper body strength?"
+    }
+  ]
+}

@@ -48,7 +48,9 @@ async def test_post_doubts_streams_sse_and_persists_to_db(fake_openai, seeded_mo
     assert events[-1]["event"] == "done"
     done_data = events[-1]["data"]
     assert done_data["cache_hit"] is False
-    assert done_data["retrieved_chunk_ids"][0] == f"module-{module.id}-chunk-1"
+    # TOPIC_B's paragraph is now split into two chunks (chunk-2, chunk-3) since
+    # it exceeds CHUNK_MAX_CHARS; chunk-2 is the one carrying the "TOPIC_B" marker.
+    assert done_data["retrieved_chunk_ids"][0] == f"module-{module.id}-chunk-2"
 
     chunk_events = [e for e in events if e["event"] == "chunk"]
     assert len(chunk_events) > 0

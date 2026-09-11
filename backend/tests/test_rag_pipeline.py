@@ -17,7 +17,9 @@ async def test_index_module_content_upserts_and_is_retrievable_from_pinecone(fak
 
     assert fake_openai.embeddings.call_count == 1
     call_kwargs = fake_openai.embeddings.call_args.kwargs
-    assert len(call_kwargs["input"]) == 2  # TOPIC_A and TOPIC_B paragraphs chunked separately
+    # Each ~1000-char paragraph exceeds CHUNK_MAX_CHARS (800), so both the
+    # TOPIC_A and TOPIC_B paragraphs get split further into two chunks apiece.
+    assert len(call_kwargs["input"]) == 4
 
     query_vector = fake_openai.fake_embedding("A learner is asking about TOPIC_A again")
     matches = await query_module_context(module.id, query_vector, top_k=2)

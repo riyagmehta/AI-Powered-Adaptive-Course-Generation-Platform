@@ -2,8 +2,8 @@ from app.config import settings
 from app.services.ai_client import client
 from app.services.pinecone_client import replace_module_vectors
 
-CHUNK_MAX_CHARS = 1500
-CHUNK_OVERLAP_CHARS = 200
+CHUNK_MAX_CHARS = 800
+CHUNK_OVERLAP_CHARS = 150
 
 
 def chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK_OVERLAP_CHARS) -> list[str]:

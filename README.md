@@ -80,6 +80,7 @@ this design (see `backend/app/worker.py` and `backend/tests/test_generation_work
 
 ```
 backend/    FastAPI app — app/{models,schemas,routers,services}, app/worker.py, alembic/, tests/
+            tests/eval/ — RAG evaluation harness (see "RAG evaluation" below)
 frontend/   React app — src/{pages,components,store,lib,types}
 docs/       Screenshots referenced below
 ```
@@ -165,6 +166,10 @@ Coverage includes:
   the worker mid-job and watching it recover on restart.
 - The existing RAG pipeline and doubt-resolution tests.
 
+`pytest` doesn't include the RAG evaluation harness (`tests/eval/`) — it costs real
+OpenAI/Pinecone calls and reports quality metrics rather than pass/fail, so it's a
+separate script; see "RAG evaluation" below.
+
 ## Rate limiting
 
 The four endpoints that call OpenAI are rate-limited via `slowapi`, keyed by the
@@ -180,6 +185,112 @@ Redis so the limits are shared across multiple worker processes:
 
 A request over the limit gets a `429` with `{"error": "Rate limit exceeded: ..."}`,
 which the frontend surfaces as a toast rather than a page-level error.
+
+## RAG evaluation
+
+RAG quality was being assumed, not measured — `tests/eval/` is a harness that
+actually measures it, using the real chunking/embedding/retrieval code paths
+against a dedicated Pinecone namespace (not any live user's data).
+
+**The eval set** (`tests/eval/corpus.json`, `eval_set.json`): a real 6-module course
+("Distributed Systems Fundamentals") generated end-to-end through the actual
+outline + content services — no lorem-ipsum. 25 question → expected-excerpt pairs
+were then generated per module (GPT-4, one prompt per module, asking for questions
+answerable from one localized passage), where the "expected excerpt" is a 10–30 word
+span verified to be an exact substring of that module's content. Scoring a retrieval
+by "does this substring appear in a retrieved chunk's text" — rather than by chunk
+*index* — is what makes the same eval set valid across different chunking schemes,
+which matters since the whole point of this exercise was to change the chunking
+scheme. 5 more questions on topics with no relationship to the course (baking,
+sports trivia, ...) test refusal instead of retrieval.
+
+**What gets measured** (`tests/eval/run_eval.py`):
+- `recall@1/3/5` and `MRR` — retrieval always fetches top-5 (so these are
+  comparable across configs), scored by whether the expected excerpt is found in
+  the top-*k* results.
+- Mean retrieval latency (embed the query + query Pinecone).
+- Groundedness rate — for each in-scope question, generate an answer from the
+  retrieved chunks (the same prompt shape `doubt_service` uses), then have GPT-4
+  judge, with a strict rubric, whether *every* claim in the answer is actually
+  supported by the retrieved context.
+- Refusal rate — same judge-based approach, but for the 5 out-of-scope questions:
+  did the assistant admit the material doesn't cover this, instead of answering
+  from outside knowledge?
+
+### Baseline: current production config
+
+| Metric | Value |
+|---|---|
+| Mean chunks/module | 4.0 |
+| recall@1 | 0.76 |
+| recall@3 | 1.00 |
+| recall@5 | 1.00 |
+| MRR | 0.867 |
+| Mean retrieval latency | 0.555s |
+| Groundedness rate | 1.00 |
+| Refusal rate | 1.00 |
+
+**The numbers confirm the suspicion, and explain why it's a problem.** At
+`chunk_size=1500`, every ~5,000-character module produces almost exactly 4 chunks —
+confirmed here, not assumed. Querying `top_k=5` against 4 candidates always returns
+*all* of them, so recall@3 and recall@5 read as a perfect 1.00 no matter how good or
+bad the actual embedding-similarity ranking is. That's a ceiling effect, not evidence
+of good retrieval — there's nowhere for the right chunk to get lost. recall@1 (0.76)
+and MRR (0.867) are the only numbers here actually saying anything about ranking
+quality, because they're the only ones where "wrong" is a reachable outcome.
+
+### Experiment: smaller chunks, and why top_k stayed at 5
+
+First attempt — the obvious move — was `chunk_size=500`, `overlap=100`, and dropping
+`answer_top_k` to 3–4. That was worse: recall@1 fell to 0.64, recall@5 to 0.80, and
+groundedness to 0.88–0.92. Before concluding smaller chunks are bad, the actual
+failure mode was checked directly: for one "miss," the expected excerpt *was*
+present verbatim in one of the module's (now 13) chunks — it just didn't rank in
+the top 5 out of 13 real candidates. At `chunk_size=1500` that same chunk would've
+been 1 of only 4 candidates and always returned; at `chunk_size=500` it's genuinely
+competing and the embedding similarity ranking isn't perfect. In other words: some
+of that "regression" is the eval finally being hard enough to measure something
+real. The groundedness drop was a separate, clearer effect of `answer_top_k=3–4`
+with smaller chunks: the model was handed less total context per answer than the
+baseline effectively gave it (which, at only 4 chunks and `top_k=5`, was *the entire
+module* every time) — with a narrower window, it filled small gaps with outside
+knowledge on 2–3 of 25 questions.
+
+Retuning to `chunk_size=800`, `overlap=150`, **with `answer_top_k` left at 5**
+(the same as baseline) isolated that: same amount of context reaching the model,
+just more precisely selected.
+
+| Metric | Baseline (1500/200, top_k=5) | Experiment (800/150, top_k=5) |
+|---|---|---|
+| Mean chunks/module | 4.0 | 7.7 |
+| recall@1 | 0.76 | 0.76 |
+| recall@3 | 1.00 | 0.96 |
+| recall@5 | 1.00 | 1.00 |
+| MRR | 0.867 | 0.848 |
+| Mean retrieval latency | 0.555s | 0.414s |
+| Groundedness rate | 1.00 | 1.00 |
+| Refusal rate | 1.00 | 1.00 |
+
+recall@1, recall@5, groundedness, and refusal are unchanged; recall@3 and MRR moved
+by one question out of 25 (within noise at this sample size) — not a meaningful
+regression. Retrieval latency, if anything, improved slightly.
+
+**Action taken**: `CHUNK_MAX_CHARS`/`CHUNK_OVERLAP_CHARS` in
+`app/services/embedding_service.py` are now `800`/`150` (were `1500`/`200`).
+`doubt_retrieval_top_k` in `app/config.py` was deliberately **left at 5** — the
+data showed lowering it hurts groundedness for this corpus, so the part of the
+original hypothesis that turned out to be wrong wasn't shipped. The real win isn't
+a metrics bump (this corpus's modules are short enough that the baseline's
+"retrieve everything" behavior was already giving the model full context); it's
+that recall@3/recall@5 now measure something real instead of trivially reading
+1.00, so future retrieval regressions (e.g. as modules get longer, or if the
+embedding model changes) will actually show up here.
+
+**Reproducing this**: `cd backend && python -m tests.eval.run_eval --name
+{baseline,experiment} --chunk-size N --chunk-overlap N --answer-top-k N`. Full
+per-question results are in `tests/eval/results/*.json`. Regenerating the corpus or
+eval set (`generate_corpus.py`, `generate_eval_set.py`) costs real OpenAI calls and
+isn't required to re-run the eval — only if you want a fresh course/question set.
 
 ## Production deployment
 
