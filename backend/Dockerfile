@@ -35,8 +35,10 @@ EXPOSE 8000
 # pass them with `docker run --env-file .env` / a compose `environment:` block,
 # not by baking a .env file into the image.
 #
-# $PORT is respected (falling back to 8000) because platforms like Railway
+# $PORT is respected (falling back to 8000) because platforms like Render
 # assign it dynamically rather than letting you fix it. $WEB_CONCURRENCY
-# controls the uvicorn worker count (default 2) — raise it if your instance
-# has the CPU/RAM to spare.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2}"]
+# controls the uvicorn worker count — it defaults to 1 because Render's free
+# web service tier caps out at 512MB RAM / 0.1 CPU, which a second worker
+# process (plus the OpenAI/Pinecone clients each one loads) can blow through;
+# raise it via env var if your instance has the CPU/RAM to spare.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-1}"]

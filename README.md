@@ -8,7 +8,7 @@ and milliseconds.
 
 ## Running this
 
-No live demo is deployed right now. Deployment steps (Railway + Vercel) are under
+No live demo is deployed right now. Deployment steps (Render + Vercel) are under
 ["Production deployment"](#production-deployment) below. To run it locally:
 
 ```bash
@@ -437,35 +437,55 @@ entirely from real process environment variables (`--env-file` / a compose
 `environment:` block), and the API respects `$PORT` and `$WEB_CONCURRENCY` for
 platforms that assign these dynamically.
 
-### Deploying to Railway (backend) + Vercel (frontend)
+### Deploying to Render (backend) + Vercel (frontend)
 
-Every credential below is set directly in the Railway or Vercel dashboard, never
-pasted into a chat.
+The backend — API, ARQ worker, Postgres, and Redis — is defined as a single
+[Render Blueprint](https://render.com/docs/infrastructure-as-code) in `render.yaml`
+at the repo root, targeting Render's free tier throughout. Every credential below is
+entered directly in the Render or Vercel dashboard, never pasted into a chat.
 
-1. **Railway, project + databases:** New Project, deploy from this GitHub repo, then
-   set that service's **Settings → Source → Root Directory** to `backend` (Railway
-   picks up `backend/Dockerfile` and `backend/railway.json` automatically). Add
-   PostgreSQL and Redis from the project canvas (**+ New → Database**).
-2. **API service variables:** `DATABASE_URL` and `REDIS_URL` as references
-   (`${{Postgres.DATABASE_URL}}`, `${{Redis.REDIS_URL}}`), plus a real
-   `JWT_SECRET_KEY` you generate yourself, `OPENAI_API_KEY`, `PINECONE_API_KEY`,
-   `PINECONE_INDEX_NAME`, and `CORS_ORIGINS` (a placeholder for now). Don't set
-   `PORT`, Railway injects it. `app/config.py` normalizes Railway's plain
-   `postgresql://` URL to the asyncpg driver automatically, and
-   `PINECONE_ENVIRONMENT` isn't used by this app.
-3. **Worker, as a second service:** add it from the same repo with the same Root
-   Directory, but override **Settings → Deploy → Custom Start Command** to `arq
-   app.worker.WorkerSettings --custom-log-dict app.worker.ARQ_LOG_CONFIG`, and clear
-   the **Healthcheck Path** (the worker has no HTTP server, so an HTTP healthcheck
-   would crash-loop it). Give it the same `DATABASE_URL`/`REDIS_URL`/
-   `OPENAI_API_KEY`/`PINECONE_*` variables as the API service (Railway's
-   project-level Shared Variables make this easy).
-4. **Public URL:** on the API service, **Settings → Networking → Generate Domain**.
-5. **Vercel:** import this repo, set **Root Directory** to `frontend` (Vite preset
-   auto-detects), add `VITE_API_URL` = the Railway URL from step 4, deploy.
-6. **Close the loop:** back in Railway, set the API service's `CORS_ORIGINS` to the
-   real Vercel URL from step 5, comma-separated if you add more later (e.g. a custom
-   domain or preview deployments).
+> **Free tier means slow first requests.** Render's free web services and workers
+> spin down after 15 minutes with no traffic. The next request wakes the container
+> back up, which takes roughly **30-60 seconds** before it responds — expect that
+> delay on the first hit after any idle period, not just after a deploy. Free
+> Postgres also expires 30 days after creation (14-day grace period to upgrade or
+> export before data is deleted), and the free Redis/Key Value instance is capped at
+> 25MB and doesn't persist data across restarts — both fine for a demo, not for
+> anything you need to keep.
+
+1. **Render, sync the Blueprint:** Dashboard → **New → Blueprint**, pick this GitHub
+   repo. Render reads `render.yaml` and proposes three services: the
+   `course-platform-api` web service and `course-platform-worker` background worker
+   (both built from `backend/Dockerfile` via the blueprint's `rootDir: backend`), a
+   free `course-platform-postgres` database, and a free `course-platform-redis`
+   Key Value instance. `DATABASE_URL` and `REDIS_URL` are wired automatically on both
+   services via the blueprint's `fromDatabase`/`fromService` references.
+2. **Secrets:** the blueprint declares `JWT_SECRET_KEY`, `OPENAI_API_KEY`,
+   `PINECONE_API_KEY`, and `PINECONE_INDEX_NAME` as `sync: false` on both services, so
+   Render prompts for each during the sync — paste real values (generate
+   `JWT_SECRET_KEY` yourself). `CORS_ORIGINS` is also `sync: false` on the API
+   service; leave it as a placeholder for now, you'll set it for real in step 4.
+   `PINECONE_ENVIRONMENT` isn't used by this app. Don't set `PORT`; Render injects it,
+   and `app/config.py` already normalizes Render's plain `postgres://` connection
+   string to the asyncpg driver the same way it does for other providers.
+3. **Public URL:** after the sync finishes, the API service's dashboard page shows
+   its `onrender.com` URL under **Settings**.
+4. **Vercel:** import this repo, set **Root Directory** to `frontend` (Vite preset
+   auto-detects), add `VITE_API_URL` = the Render URL from step 3, deploy.
+5. **Close the loop:** back on Render, set the API service's `CORS_ORIGINS` env var to
+   the real Vercel URL from step 4 (comma-separated if you add more later, e.g. a
+   custom domain or preview deployments) — this triggers a redeploy of the API
+   service only, the worker is untouched.
+
+`WEB_CONCURRENCY` is pinned to `1` in `render.yaml` for the API service: free web
+services get 512MB RAM / 0.1 CPU, and a second uvicorn worker process (each with its
+own OpenAI/Pinecone clients) risks OOM at that ceiling. Migrations still run on every
+API deploy — `backend/Dockerfile`'s `CMD` runs `alembic upgrade head` before starting
+uvicorn, and Render always runs the image's `CMD`/start command fresh on deploy, so
+there's no separate release-phase step to configure. The worker service overrides
+that same image's command (via the blueprint's `dockerCommand`) to run `arq` instead,
+and never runs migrations itself — safe to scale to multiple worker instances later
+without racing migrations against each other.
 
 `vercel.json` already adds the SPA rewrite Vercel needs so client-side routes like
 `/dashboard` don't 404 on a hard refresh.

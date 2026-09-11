@@ -1,0 +1,90 @@
+# Render Blueprint — deploys the API, the ARQ worker, Postgres, and Redis
+# together. Sync this repo as a Blueprint from the Render dashboard (New +
+# Blueprint), or run `render blueprint launch` with the CLI. Everything here
+# targets Render's free tier: free web/worker services spin down after 15
+# minutes of inactivity, so the first request afterward takes 30-60s to wake
+# back up; free Postgres expires 30 days after creation (14-day grace period
+# after that); free Key Value (Redis) is capped at 25MB and its data does not
+# survive a restart. See backend/app/services/job_queue.py for how job state
+# is recovered when the worker restarts.
+
+databases:
+  - name: course-platform-postgres
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
+
+services:
+  - name: course-platform-redis
+    type: keyvalue
+    plan: free
+    region: oregon
+    # No external client ever needs to reach this directly — only the API and
+    # worker services in this same project, which connect over Render's
+    # internal network regardless of this list. Empty blocks public access.
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+  - name: course-platform-api
+    type: web
+    runtime: docker
+    plan: free
+    region: oregon
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: course-platform-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: course-platform-redis
+          type: keyvalue
+          property: connectionString
+      # Free web services get 512MB RAM / 0.1 CPU — 2 uvicorn workers (the
+      # Dockerfile's non-Render default) risks OOM under that ceiling
+      # alongside the OpenAI/Pinecone clients, so pin this to 1 here.
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        sync: false
+      # Set after the Vercel deploy exists (see README "Production
+      # deployment"); a placeholder here would just mean CORS rejects the
+      # frontend until it's filled in.
+      - key: CORS_ORIGINS
+        sync: false
+
+  - name: course-platform-worker
+    type: worker
+    runtime: docker
+    plan: free
+    region: oregon
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: arq app.worker.WorkerSettings --custom-log-dict app.worker.ARQ_LOG_CONFIG
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: course-platform-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: course-platform-redis
+          type: keyvalue
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        sync: false
