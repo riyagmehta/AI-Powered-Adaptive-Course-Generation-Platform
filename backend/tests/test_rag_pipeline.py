@@ -6,7 +6,12 @@ from app.services import doubt_service
 from app.services.doubt_service import resolve_doubt
 from app.services.embedding_service import index_module_content
 from app.services.pinecone_client import query_module_context
-from app.services.redis_client import doubt_cache_key, get_cached_doubt, redis_client
+from app.services.redis_client import doubt_cache_key, get_cached_doubt, get_redis_client
+
+# Every test in this file indexes into / queries a real Pinecone index (only
+# the OpenAI side is mocked, via fake_openai) — see pytest.ini for what that
+# means for CI vs local runs.
+pytestmark = pytest.mark.live
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -66,4 +71,4 @@ async def test_resolve_doubt_cache_miss_then_hit(fake_openai, seeded_module, mon
     # The question is still embedded every time (cache check happens after embedding).
     assert fake_openai.embeddings.call_count == 3  # 1 module chunk batch + 2 question embeds
 
-    await redis_client.delete(cache_key)
+    await get_redis_client().delete(cache_key)

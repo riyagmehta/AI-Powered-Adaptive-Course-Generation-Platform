@@ -1,12 +1,20 @@
 import asyncio
+from functools import lru_cache
 from typing import Any
 
 from pinecone import Pinecone
 
 from app.config import settings
 
-_pc = Pinecone(api_key=settings.pinecone_api_key)
-_index = _pc.Index(settings.pinecone_index_name)
+
+@lru_cache
+def _get_index():
+    """Constructed lazily and cached, not at import time — `Pinecone(api_key=...)`
+    raises immediately if the key is missing/blank (e.g. in CI, which has no real
+    Pinecone credentials), so building it eagerly at module scope meant merely
+    importing this module required live credentials."""
+    pc = Pinecone(api_key=settings.pinecone_api_key)
+    return pc.Index(settings.pinecone_index_name)
 
 
 def _module_namespace(module_id: int) -> str:
@@ -20,9 +28,10 @@ async def replace_module_vectors(
     embeddings: list[list[float]],
 ) -> None:
     namespace = _module_namespace(module_id)
+    index = _get_index()
 
     try:
-        await asyncio.to_thread(_index.delete, delete_all=True, namespace=namespace)
+        await asyncio.to_thread(index.delete, delete_all=True, namespace=namespace)
     except Exception as exc:
         if "Namespace not found" not in str(exc):
             raise
@@ -41,7 +50,7 @@ async def replace_module_vectors(
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings))
     ]
     if vectors:
-        await asyncio.to_thread(_index.upsert, vectors=vectors, namespace=namespace)
+        await asyncio.to_thread(index.upsert, vectors=vectors, namespace=namespace)
 
 
 async def query_module_context(
@@ -51,7 +60,7 @@ async def query_module_context(
 ) -> list[dict[str, Any]]:
     namespace = _module_namespace(module_id)
     result = await asyncio.to_thread(
-        _index.query,
+        _get_index().query,
         vector=embedding,
         top_k=top_k,
         namespace=namespace,

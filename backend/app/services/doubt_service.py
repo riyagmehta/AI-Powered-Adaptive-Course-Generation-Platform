@@ -4,7 +4,7 @@ from typing import Any
 
 from app.config import settings
 from app.models.module import Module
-from app.services.ai_client import client
+from app.services.ai_client import get_openai_client
 from app.services.embedding_service import embed_text
 from app.services.llm_metrics import record_llm_call
 from app.services.pinecone_client import query_module_context
@@ -27,7 +27,7 @@ async def stream_chat_answer(
     module: Module, question: str, context_chunks: list[str], *, user_id: int | None = None
 ) -> AsyncGenerator[str, None]:
     start = time.perf_counter()
-    stream = await client.chat.completions.create(
+    stream = await get_openai_client().chat.completions.create(
         model=settings.openai_chat_model,
         stream=True,
         stream_options={"include_usage": True},

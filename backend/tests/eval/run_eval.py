@@ -27,7 +27,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import settings
-from app.services.ai_client import client
+from app.services.ai_client import get_openai_client
 from app.services.embedding_service import chunk_text, embed_text, embed_texts
 from app.services.pinecone_client import query_module_context, replace_module_vectors
 
@@ -112,7 +112,7 @@ async def generate_answer(module_title: str, question: str, context_chunks: list
         "primary source of truth. If the excerpts don't contain the answer, say so honestly instead "
         f"of making things up.\n\nRetrieved context:\n{context}"
     )
-    response = await client.chat.completions.create(
+    response = await get_openai_client().chat.completions.create(
         model=settings.openai_chat_model,
         temperature=0.3,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": question}],
@@ -121,7 +121,7 @@ async def generate_answer(module_title: str, question: str, context_chunks: list
 
 
 async def judge(system_prompt: str, payload: str) -> dict:
-    response = await client.chat.completions.create(
+    response = await get_openai_client().chat.completions.create(
         model=settings.openai_chat_model,
         response_format={"type": "json_object"},
         temperature=0,

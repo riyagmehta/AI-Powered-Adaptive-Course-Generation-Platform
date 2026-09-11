@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from app.config import settings
-from app.services.ai_client import client
+from app.services.ai_client import get_openai_client
 
 CORPUS_PATH = Path(__file__).parent / "corpus.json"
 OUTPUT_PATH = Path(__file__).parent / "eval_set.json"
@@ -57,7 +57,7 @@ OUT_OF_SCOPE_QUESTIONS = [
 
 async def generate_for_module(module: dict) -> list[dict]:
     content = module["content"]
-    response = await client.chat.completions.create(
+    response = await get_openai_client().chat.completions.create(
         model=settings.openai_chat_model,
         response_format={"type": "json_object"},
         temperature=0.5,

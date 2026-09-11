@@ -13,7 +13,7 @@ import structlog
 
 from app.database import AsyncSessionLocal
 from app.models.llm_call import LLMCall
-from app.services.ai_client import client
+from app.services.ai_client import get_openai_client
 
 logger = structlog.get_logger()
 
@@ -99,7 +99,7 @@ async def instrumented_chat_completion(
     only — the one streaming call site instruments itself, since it needs to
     capture usage from the final chunk after yielding all the deltas)."""
     start = time.perf_counter()
-    response = await client.chat.completions.create(**create_kwargs)
+    response = await get_openai_client().chat.completions.create(**create_kwargs)
     latency_ms = (time.perf_counter() - start) * 1000
 
     usage = getattr(response, "usage", None)
@@ -128,7 +128,7 @@ async def instrumented_embeddings(
 ):
     """Drop-in for `client.embeddings.create(**create_kwargs)`."""
     start = time.perf_counter()
-    response = await client.embeddings.create(**create_kwargs)
+    response = await get_openai_client().embeddings.create(**create_kwargs)
     latency_ms = (time.perf_counter() - start) * 1000
 
     usage = getattr(response, "usage", None)

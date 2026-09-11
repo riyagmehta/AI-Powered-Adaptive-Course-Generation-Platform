@@ -292,8 +292,18 @@ Open `http://localhost:5173`.
 
 ```bash
 cd backend
-pytest -x
+pytest -x               # everything except tests marked `live`
+pytest -x -m live       # only the tests that need a real, reachable Pinecone index
 ```
+
+Importing any service module (`ai_client`, `redis_client`, `pinecone_client`) never
+requires credentials or makes a network call by itself — each lazily constructs and
+caches its client (`get_openai_client()`, `get_redis_client()`, an internal
+`_get_index()`) on first actual use instead of at module import time. That's what
+makes it possible to run most of the suite with no external credentials at all: only
+the handful of tests that actually call Pinecone are marked `@pytest.mark.live`
+(`tests/test_rag_pipeline.py`, `tests/test_doubts_endpoint.py` — the OpenAI side of
+both is still mocked via `fake_openai`) and excluded from the default run.
 
 Coverage includes:
 - Quiz scoring and difficulty-recalibration logic (`tests/test_quiz_service.py` — pure
@@ -324,14 +334,13 @@ separate script; see "RAG evaluation" below.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and PR: the backend job spins up real
-Postgres and Redis service containers, runs migrations, and runs the full `pytest`
-suite against them; the frontend job runs `tsc -b` and `npm run build`.
+Postgres and Redis service containers, runs migrations, and runs `pytest -m "not
+live"`; the frontend job runs `tsc -b` and `npm run build`.
 
-`test_rag_pipeline.py` and `test_doubts_endpoint.py` query a real Pinecone index
-(only the OpenAI side is mocked) — for the backend job to fully pass, add
-`PINECONE_API_KEY` and `PINECONE_INDEX_NAME` as repo secrets (**Settings → Secrets
-and variables → Actions**). Without them those two test files fail with a Pinecone
-auth error; everything else still passes.
+No Pinecone credentials are configured in CI at all, and none are needed — the two
+test files that query a real Pinecone index are marked `live` and excluded from
+CI's run (see "Testing" above). They're still run locally, against a real index,
+before anything ships.
 
 ## Rate limiting
 

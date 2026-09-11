@@ -1,4 +1,5 @@
 import random
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -6,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from app.database import AsyncSessionLocal
 from app.main import app
 from app.models.user import User
+from app.services import embedding_service
 from app.services.embedding_service import index_module_content
 from app.services.security import create_access_token, hash_password
 
@@ -22,7 +24,7 @@ async def test_non_admin_gets_403(seeded_module):
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_admin_sees_metrics_including_a_real_llm_call(fake_openai, seeded_module):
+async def test_admin_sees_metrics_including_a_real_llm_call(fake_openai, seeded_module, monkeypatch):
     async with AsyncSessionLocal() as db:
         admin = User(
             email=f"admin-test-{random.randint(1, 10**9)}@example.com",
@@ -35,8 +37,11 @@ async def test_admin_sees_metrics_including_a_real_llm_call(fake_openai, seeded_
         await db.refresh(admin)
 
     module, course = seeded_module.module, seeded_module.course
-    # A real (fake_openai-mocked) embedding call — this should show up as an
-    # llm_calls row and be reflected in the aggregation below.
+    # This test is about the /admin/metrics aggregation, not RAG — stub out
+    # the actual Pinecone write so it doesn't need a live index, while still
+    # exercising the real (fake_openai-mocked) embedding call that should
+    # show up as an llm_calls row and be reflected in the aggregation below.
+    monkeypatch.setattr(embedding_service, "replace_module_vectors", AsyncMock())
     await index_module_content(module.id, course.id, module.content, endpoint="POST /courses")
 
     token = create_access_token(subject=admin.email)

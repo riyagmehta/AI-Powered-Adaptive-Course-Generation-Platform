@@ -7,8 +7,13 @@ from app.database import AsyncSessionLocal
 from app.main import app
 from app.models.doubt import Doubt
 from app.services.embedding_service import index_module_content
-from app.services.redis_client import doubt_cache_key, redis_client
+from app.services.redis_client import doubt_cache_key, get_redis_client
 from app.services.security import create_access_token
+
+# Indexes into / queries a real Pinecone index (only the OpenAI side is
+# mocked, via fake_openai) — see pytest.ini for what that means for CI vs
+# local runs.
+pytestmark = pytest.mark.live
 
 
 def _parse_sse(raw_body: str) -> list[dict]:
@@ -64,4 +69,4 @@ async def test_post_doubts_streams_sse_and_persists_to_db(fake_openai, seeded_mo
         assert doubt.cache_hit is False
         assert doubt.answer == "".join(e["data"]["delta"] for e in chunk_events)
 
-    await redis_client.delete(doubt_cache_key(module.id, question))
+    await get_redis_client().delete(doubt_cache_key(module.id, question))

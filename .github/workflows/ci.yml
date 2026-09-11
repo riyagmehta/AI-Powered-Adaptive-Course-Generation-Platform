@@ -41,13 +41,13 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/course_platform
       REDIS_URL: redis://localhost:6379/0
       JWT_SECRET_KEY: ci-only-throwaway-secret-not-used-anywhere-real
+      # Never actually called for real: every test that touches the OpenAI
+      # client goes through the fake_openai fixture. No Pinecone credentials
+      # here at all — tests requiring a live Pinecone index are marked
+      # `live` and excluded below; run them locally instead (see README).
       OPENAI_API_KEY: sk-ci-placeholder-never-called-for-real
-      # test_rag_pipeline.py / test_doubts_endpoint.py query a real Pinecone
-      # index (OpenAI calls are mocked; Pinecone's nearest-neighbor behavior
-      # is deliberately not). Add these two as repo secrets under Settings ->
-      # Secrets and variables -> Actions for the full suite to pass.
-      PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
-      PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
+      PINECONE_API_KEY: ""
+      PINECONE_INDEX_NAME: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -64,8 +64,8 @@ jobs:
       - name: Run migrations
         run: alembic upgrade head
 
-      - name: Run tests
-        run: pytest -x
+      - name: Run tests (excluding tests that need a live Pinecone index)
+        run: pytest -x -m "not live"
 
   frontend:
     runs-on: ubuntu-latest

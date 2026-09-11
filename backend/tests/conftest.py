@@ -13,7 +13,6 @@ from app.models.module import Module
 from app.models.user import User
 from app.services import ai_client
 from app.services.pinecone_client import replace_module_vectors
-from app.services.redis_client import redis_client
 from app.services.security import hash_password
 
 _TOPIC_BASE_VECTORS: dict[str, list[float]] = {}
@@ -74,8 +73,8 @@ async def _fake_chat_completions_create(*, model, messages, stream=False, temper
 def fake_openai(monkeypatch):
     embeddings_mock = AsyncMock(side_effect=_fake_embeddings_create)
     chat_mock = AsyncMock(side_effect=_fake_chat_completions_create)
-    monkeypatch.setattr(ai_client.client.embeddings, "create", embeddings_mock)
-    monkeypatch.setattr(ai_client.client.chat.completions, "create", chat_mock)
+    monkeypatch.setattr(ai_client.get_openai_client().embeddings, "create", embeddings_mock)
+    monkeypatch.setattr(ai_client.get_openai_client().chat.completions, "create", chat_mock)
     return SimpleNamespace(embeddings=embeddings_mock, chat=chat_mock, fake_embedding=fake_embedding)
 
 
@@ -118,6 +117,15 @@ async def seeded_module():
 
         yield SimpleNamespace(user=user, course=course, module=module, db=db)
 
-        await replace_module_vectors(module.id, course.id, [], [])
+        # Not every test using this fixture actually indexes anything into
+        # Pinecone (e.g. tests/test_quiz_attempt_endpoint.py never touches
+        # RAG at all) — so this cleanup is best-effort, not required. In
+        # particular it must not raise when Pinecone isn't configured at all
+        # (no credentials in CI), which would otherwise fail teardown for
+        # tests that never dirtied Pinecone in the first place.
+        try:
+            await replace_module_vectors(module.id, course.id, [], [])
+        except Exception:
+            pass
         await db.delete(user)
         await db.commit()

@@ -7,7 +7,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
-from app.services.redis_client import redis_client
+from app.services.redis_client import get_redis_client
 
 logger = structlog.get_logger()
 
@@ -81,7 +81,7 @@ class TimingMiddleware(BaseHTTPMiddleware):
 async def _record_route_latency(method: str, route_path: str, duration_ms: float) -> None:
     key = f"latency:{method}:{route_path}"
     try:
-        async with redis_client.pipeline(transaction=True) as pipe:
+        async with get_redis_client().pipeline(transaction=True) as pipe:
             pipe.lpush(key, duration_ms)
             pipe.ltrim(key, 0, LATENCY_SAMPLE_CAP - 1)
             pipe.sadd(LATENCY_ROUTES_SET_KEY, key)

@@ -18,7 +18,7 @@ from app.schemas.admin import (
     RouteLatency,
 )
 from app.services.auth_service import get_current_user
-from app.services.redis_client import redis_client
+from app.services.redis_client import get_redis_client
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -37,6 +37,7 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
 
 
 async def _route_latency_stats() -> list[RouteLatency]:
+    redis_client = get_redis_client()
     keys = await redis_client.smembers(LATENCY_ROUTES_SET_KEY)
     stats = []
     for key in keys:
