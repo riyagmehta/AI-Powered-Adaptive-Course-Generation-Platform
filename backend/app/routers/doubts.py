@@ -2,7 +2,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from app.models.user import User
 from app.schemas.doubt import DoubtCreate
 from app.services.auth_service import get_current_user
 from app.services.doubt_service import resolve_doubt
+from app.services.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,9 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.post("")
+@limiter.limit("15/minute")
 async def create_doubt(
+    request: Request,
     payload: DoubtCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

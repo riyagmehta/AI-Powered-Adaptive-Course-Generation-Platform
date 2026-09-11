@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { apiUrl } from '../lib/api'
 import { streamSSE } from '../lib/sse'
+import { toast } from '../store/toastStore'
 
 export interface DoubtHistoryItem {
   doubtId: number
@@ -54,11 +55,14 @@ export function DoubtDrawer({ moduleId, isOpen, onClose, history, onNewDoubt }: 
             })
           } else if (event === 'error') {
             setError(data.detail as string)
+            toast.error(data.detail as string)
           }
         },
       })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to get an answer.')
+      const message = err instanceof Error ? err.message : 'Failed to get an answer.'
+      setError(message)
+      toast.error(message)
     } finally {
       setIsStreaming(false)
       setPendingQuestion(null)

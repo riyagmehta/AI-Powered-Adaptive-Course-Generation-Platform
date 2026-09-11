@@ -6,6 +6,7 @@ import { ModuleSidebar } from '../components/ModuleSidebar'
 import { NavBar } from '../components/NavBar'
 import { api, apiUrl } from '../lib/api'
 import { SSEHttpError, streamSSE } from '../lib/sse'
+import { toast } from '../store/toastStore'
 import type { CourseDetail } from '../types/api'
 
 export function CoursePage() {
@@ -60,6 +61,7 @@ export function CoursePage() {
         }
         if (module.status === 'failed') {
           setStreamError('Module generation failed. Please try again.')
+          toast.error(`"${module.title}" failed to generate.`)
           setIsStreaming(false)
           return
         }
@@ -81,6 +83,7 @@ export function CoursePage() {
               fetchCourse()
             } else if (event === 'error') {
               setStreamError(data.detail as string)
+              toast.error(data.detail as string)
               setIsStreaming(false)
             }
           },
@@ -91,7 +94,9 @@ export function CoursePage() {
           await pollUntilReady()
           return
         }
-        setStreamError(err instanceof Error ? err.message : 'Failed to load content.')
+        const message = err instanceof Error ? err.message : 'Failed to load content.'
+        setStreamError(message)
+        toast.error(message)
         setIsStreaming(false)
       }
     }

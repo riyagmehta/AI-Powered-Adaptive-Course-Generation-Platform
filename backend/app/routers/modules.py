@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncGenerator
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from app.models.user import User
 from app.services.auth_service import get_current_user
 from app.services.content_service import stream_module_content
 from app.services.embedding_service import index_module_content
+from app.services.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,9 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.get("/{module_id}/stream")
+@limiter.limit("10/minute")
 async def stream_module(
+    request: Request,
     module_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,6 +11,7 @@ from app.schemas.course import CourseCreate, CourseDetail, CourseRead
 from app.services.auth_service import get_current_user
 from app.services.content_service import generate_and_save_first_module
 from app.services.outline_service import OutlineGenerationError, synthesize_outline
+from app.services.rate_limit import limiter
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -22,7 +23,9 @@ DIFFICULTY_BY_EXPERIENCE = {
 
 
 @router.post("", response_model=CourseDetail, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
 async def create_course(
+    request: Request,
     payload: CourseCreate,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),

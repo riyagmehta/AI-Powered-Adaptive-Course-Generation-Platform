@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { NavBar } from '../components/NavBar'
 import { api } from '../lib/api'
 import { extractErrorMessage } from '../store/authStore'
+import { toast } from '../store/toastStore'
 import type { CourseDetail, CourseRead } from '../types/api'
 
 export function DashboardPage() {
@@ -26,6 +27,7 @@ export function DashboardPage() {
         topic: topic.trim() || undefined,
         num_modules: numModules,
       })
+      toast.success(`Course "${course.title}" created!`)
       navigate(`/courses/${course.id}`)
     } catch (err) {
       setError(extractErrorMessage(err))

@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { NavBar } from '../components/NavBar'
 import { api } from '../lib/api'
 import { extractErrorMessage } from '../store/authStore'
+import { toast } from '../store/toastStore'
 import type { QuizAttemptRead, QuizRead } from '../types/api'
 
 export function QuizPage() {
@@ -50,6 +51,13 @@ export function QuizPage() {
     try {
       const { data } = await api.post<QuizAttemptRead>(`/quizzes/${quiz.id}/attempt`, { answers })
       setAttempt(data)
+      if (data.new_difficulty !== data.difficulty_at_attempt) {
+        toast.success(
+          `Scored ${data.score.toFixed(0)}%! Difficulty changed: ${data.difficulty_at_attempt} → ${data.new_difficulty}.`,
+        )
+      } else {
+        toast.info(`Scored ${data.score.toFixed(0)}%.`)
+      }
     } catch (err) {
       setError(extractErrorMessage(err))
     } finally {

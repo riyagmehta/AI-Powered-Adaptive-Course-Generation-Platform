@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.quiz import QuizAttemptCreate, QuizAttemptRead, QuizRead
 from app.services.auth_service import get_current_user
 from app.services.quiz_service import generate_quiz_questions, recalibrate_difficulty, score_attempt
+from app.services.rate_limit import limiter
 
 router = APIRouter(tags=["quizzes"])
 
@@ -26,7 +27,9 @@ async def _get_owned_module(module_id: int, current_user: User, db: AsyncSession
 
 
 @router.post("/modules/{module_id}/quiz", response_model=QuizRead, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def create_quiz(
+    request: Request,
     module_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

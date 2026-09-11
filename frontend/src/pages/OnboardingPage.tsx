@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { extractErrorMessage, useAuthStore } from '../store/authStore'
+import { toast } from '../store/toastStore'
 import type { CourseDetail } from '../types/api'
 
 const EXPERIENCE_LEVELS = [
@@ -37,6 +38,7 @@ export function OnboardingPage() {
         onboarding_completed: true,
       })
       const { data: course } = await api.post<CourseDetail>('/courses', {})
+      toast.success(`Welcome! Your course "${course.title}" is ready.`)
       navigate(`/courses/${course.id}`)
     } catch (err) {
       setError(extractErrorMessage(err))
