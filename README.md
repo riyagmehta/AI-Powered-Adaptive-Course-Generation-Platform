@@ -1,19 +1,159 @@
 # AI-Powered Adaptive Course Generation Platform
 
+An adaptive course platform: GPT-4o-mini generates lesson content, Pinecone-backed RAG
+answers questions about it, and quiz results recalibrate difficulty in a closed loop.
+The engineering interest is less the demo and more what it took to make generation
+survive a crash, retrieval quality get measured instead of assumed, and every LLM
+call get accounted for in dollars and milliseconds.
+
+## Running this
+
+No live demo is deployed right now — deployment steps (Railway + Vercel) are under
+["Production deployment"](#production-deployment) below. To run it locally:
+
+```bash
+cp .env.example .env   # fill in OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX_NAME, JWT_SECRET_KEY
+docker compose up -d   # Postgres, Redis, and the ARQ worker
+
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --reload
+
+cd ../frontend
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Full prerequisites and what each step does are under ["Setup"](#setup) below.
+
 [![CI](https://github.com/riyagmehta/AI-Powered-Adaptive-Course-Generation-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/riyagmehta/AI-Powered-Adaptive-Course-Generation-Platform/actions/workflows/ci.yml)
 
-An adaptive learning platform: describe what you want to learn, get a GPT-4-generated
-course outline, watch lessons finish generating in the background, ask questions
-answered with RAG over the lesson content, take generated quizzes, and have the
-course's difficulty recalibrate itself based on how you score.
+![Course content view: module sidebar with generation-status badges, lesson content rendered once the background job finishes](docs/screenshots/03-course-content.png)
+
+## Engineering notes
+
+Concrete problems that came up building this, and what actually fixed them —
+not a feature list.
+
+- **SSE cancellation left modules stuck mid-generation.** Module content used to
+  stream directly over the request connection (`GET /modules/{id}/stream`). If the
+  client disconnected mid-stream, the coroutine received `asyncio.CancelledError` —
+  which `except Exception` doesn't catch, since `CancelledError` is a `BaseException`
+  in modern Python. The module was left at `status="generating"` forever, with
+  nothing to ever revisit it. Fixed at the time with a shielded rollback
+  (`anyio.CancelScope(shield=True)` to flip the status back before re-raising, even
+  though the enclosing scope was already cancelled) — and the same failure mode
+  (an interruption nothing revisits) is exactly why generation later moved off the
+  request path into a durable job queue instead of getting patched again.
+
+- **Pinecone serverless doesn't support metadata-filtered deletes.** Regenerating a
+  module's content means the old vectors need to go first. Serverless Pinecone
+  indexes only support `delete(delete_all=True)` scoped to a namespace — not
+  `delete(filter={...})` by metadata, which is pod-based-index-only. So every module
+  gets its own Pinecone namespace (`module-{id}`): "replace this module's vectors"
+  becomes "clear this one namespace, then upsert," which serverless does support.
+
+- **`FastAPI BackgroundTasks` looked sufficient until a restart proved otherwise.**
+  Content generation started as an in-process `BackgroundTask` fired from
+  `POST /courses`. It has no persistence: if the API process restarted or crashed
+  mid-generation, the task and any trace it ever ran were just gone — no retry, no
+  status the frontend could poll, nothing to distinguish "still working" from
+  "silently died." Replaced with ARQ (Redis-backed): jobs are rows in Postgres
+  (`generation_jobs`), survive a process restart, retry with exponential backoff, and
+  are queryable via `GET /modules/{id}/status` instead of guessed at.
+
+- **A 409 race between two things that both assumed they owned generation.** Course
+  creation kicked off the first module's generation in the background at the same
+  moment the frontend's content reader made its own request to start streaming it —
+  whichever won set `status="generating"` first, and the loser's request hit a `409`
+  the UI had no real handling for. Patched short-term with a client-side polling
+  fallback on 409; actually closed by making the job queue the one place generation
+  gets triggered and `GET /modules/{id}/status` the one thing polled, so there's no
+  second code path left to race it.
+
+- **Native `EventSource` couldn't do either thing this API needed.** Streaming doubt
+  answers over SSE looked like a natural fit for the browser's built-in
+  `EventSource` — until it turned out `EventSource` can't set an `Authorization`
+  header (this API is JWT-only) and can't send a POST body (needed for the question
+  text). Built a small `fetch`-based SSE reader (`frontend/src/lib/sse.ts`) that
+  parses the same `text/event-stream` wire format by hand instead, used for the
+  doubt stream and, while it existed, the module content stream.
+
+- **A cache hit that quietly still did the work wouldn't fail on a return-value
+  check alone.** The doubt-answer Redis cache needed to prove it was actually
+  skipping the expensive parts (the Pinecone query and the chat completion) on a
+  hit, not just serving a cached string while re-running the retrieval underneath
+  anyway. The test wraps `query_module_context` in an `AsyncMock(wraps=...)` spy and
+  asserts its call count — and the chat-completion mock's — stay flat across a cache
+  hit, so a regression that silently reintroduced the redundant call fails a test
+  instead of just looking fine in the response.
+
+## Measured results
+
+### Retrieval quality
+
+Full methodology, the eval set, and reproduction steps are under
+["RAG evaluation"](#rag-evaluation) below — the short version: a real 6-module
+course, 25 question → expected-passage pairs, run against the actual
+chunking/embedding/retrieval code, not a mocked stand-in.
+
+The number worth being upfront about: at the original chunk size (1,500 chars),
+each module produced almost exactly 4 chunks, so querying `top_k=5` retrieved *the
+entire module* every time. recall@3 and recall@5 read as a perfect 1.00 — which
+sounds good and measures nothing, since there was nowhere for the right chunk to
+get lost.
+
+| Metric | Baseline (1,500-char chunks) | After (800-char chunks) |
+|---|---|---|
+| Chunks/module (mean) | 4.0 | 7.7 |
+| recall@1 | 0.76 | 0.76 |
+| recall@3 | 1.00 | 0.96 |
+| recall@5 | 1.00 | 1.00 |
+| MRR | 0.867 | 0.848 |
+| Groundedness (LLM-judged) | 1.00 | 1.00 |
+| Refusal rate (5 out-of-scope questions) | 1.00 | 1.00 |
+
+A more aggressive first attempt (500-char chunks, answer context `top_k` dropped to
+3–4) actually made things worse — recall@1 fell to 0.64, groundedness to 0.88 —
+before landing on 800 chars with `top_k` left at 5. That failed attempt is written
+up in full below rather than left out, because it's the more informative of the two
+results: it's what showed the "regression" was partly the eval finally being hard
+enough to expose real ranking limits, and that the groundedness drop traced to
+context volume, not chunk size itself.
+
+**Caveat, stated plainly**: 25 questions over one generated course is a smoke test,
+not a statistically powered benchmark. It's good enough to catch "this metric
+measures nothing" and confirm a fix didn't regress anything on the same eval set —
+it is not evidence of a generally-correct chunk size for other content.
+
+### Cost and latency
+
+`GET /admin/metrics` aggregates per-call instrumentation (`app/services/llm_metrics.py`)
+that logs every chat/embedding call's tokens, computed USD cost, and latency.
+Real numbers from a single test course plus one quiz and a few doubts:
+
+- Generating one ~5,000-character module's content: 142 prompt tokens, 846
+  completion tokens, **$0.00053**, 7.0s.
+- Embedding that module for indexing: 850 tokens, **$0.000017**, 0.9s.
+- Route latency (p50 / p95, small sample): `POST /courses` 2.7s (a real GPT-4o-mini
+  outline call) · `POST /modules/{id}/quiz` 4.5s · `GET /admin/metrics` 42ms / 69ms ·
+  `GET /health` 1.2ms.
+
+These are from a handful of real requests made during development, not production
+traffic — the point isn't the specific numbers, it's that the numbers exist and are
+queryable at all, broken down by user/course/endpoint, instead of "a GPT-4o-mini
+call costs about X" being an assumption nobody checked.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[Onboarding] --> B[Outline synthesis\nGPT-4, JSON mode]
+    A[Onboarding] --> B[Outline synthesis\nGPT-4o-mini, JSON mode]
     B --> C[Module content\ndurable ARQ job]
-    C --> D[Quiz generation\nGPT-4, JSON mode]
+    C --> D[Quiz generation\nGPT-4o-mini, JSON mode]
     D --> E[Quiz attempt\nscored + explained]
     E -->|"score >= 80 promotes\nscore < 50 demotes"| B
 ```
@@ -26,7 +166,7 @@ flowchart LR
     EMB --> Cache{Redis cache?}
     Cache -->|hit| A1[Return cached answer]
     Cache -->|miss| PC[Pinecone top-k\nover this module's chunks]
-    PC --> GPT[Context-injected GPT-4]
+    PC --> GPT[Context-injected GPT-4o-mini]
     GPT --> SSE[Stream answer via SSE]
     SSE --> Save[Cache in Redis]
 ```
@@ -288,14 +428,14 @@ against a dedicated Pinecone namespace (not any live user's data).
 **The eval set** (`tests/eval/corpus.json`, `eval_set.json`): a real 6-module course
 ("Distributed Systems Fundamentals") generated end-to-end through the actual
 outline + content services — no lorem-ipsum. 25 question → expected-excerpt pairs
-were then generated per module (GPT-4, one prompt per module, asking for questions
-answerable from one localized passage), where the "expected excerpt" is a 10–30 word
-span verified to be an exact substring of that module's content. Scoring a retrieval
-by "does this substring appear in a retrieved chunk's text" — rather than by chunk
-*index* — is what makes the same eval set valid across different chunking schemes,
-which matters since the whole point of this exercise was to change the chunking
-scheme. 5 more questions on topics with no relationship to the course (baking,
-sports trivia, ...) test refusal instead of retrieval.
+were then generated per module (GPT-4o-mini, one prompt per module, asking for
+questions answerable from one localized passage), where the "expected excerpt" is a
+10–30 word span verified to be an exact substring of that module's content. Scoring
+a retrieval by "does this substring appear in a retrieved chunk's text" — rather
+than by chunk *index* — is what makes the same eval set valid across different
+chunking schemes, which matters since the whole point of this exercise was to
+change the chunking scheme. 5 more questions on topics with no relationship to the
+course (baking, sports trivia, ...) test refusal instead of retrieval.
 
 **What gets measured** (`tests/eval/run_eval.py`):
 - `recall@1/3/5` and `MRR` — retrieval always fetches top-5 (so these are
@@ -303,14 +443,14 @@ sports trivia, ...) test refusal instead of retrieval.
   the top-*k* results.
 - Mean retrieval latency (embed the query + query Pinecone).
 - Groundedness rate — for each in-scope question, generate an answer from the
-  retrieved chunks (the same prompt shape `doubt_service` uses), then have GPT-4
-  judge, with a strict rubric, whether *every* claim in the answer is actually
-  supported by the retrieved context.
+  retrieved chunks (the same prompt shape `doubt_service` uses), then have
+  GPT-4o-mini judge, with a strict rubric, whether *every* claim in the answer is
+  actually supported by the retrieved context.
 - Refusal rate — same judge-based approach, but for the 5 out-of-scope questions:
   did the assistant admit the material doesn't cover this, instead of answering
   from outside knowledge?
 
-### Baseline: current production config
+### Baseline: original production config
 
 | Metric | Value |
 |---|---|
