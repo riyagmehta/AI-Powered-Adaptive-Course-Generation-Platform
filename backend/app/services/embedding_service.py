@@ -1,5 +1,5 @@
 from app.config import settings
-from app.services.ai_client import client
+from app.services.llm_metrics import instrumented_embeddings
 from app.services.pinecone_client import replace_module_vectors
 
 CHUNK_MAX_CHARS = 800
@@ -32,10 +32,23 @@ def chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK
     return chunks
 
 
-async def embed_texts(texts: list[str]) -> list[list[float]]:
+async def embed_texts(
+    texts: list[str],
+    *,
+    purpose: str = "embedding",
+    endpoint: str = "unknown",
+    user_id: int | None = None,
+    course_id: int | None = None,
+    module_id: int | None = None,
+) -> list[list[float]]:
     if not texts:
         return []
-    response = await client.embeddings.create(
+    response = await instrumented_embeddings(
+        purpose=purpose,
+        endpoint=endpoint,
+        user_id=user_id,
+        course_id=course_id,
+        module_id=module_id,
         model=settings.openai_embedding_model,
         input=texts,
         dimensions=settings.openai_embedding_dimensions,
@@ -43,14 +56,18 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     return [item.embedding for item in response.data]
 
 
-async def embed_text(text: str) -> list[float]:
-    vectors = await embed_texts([text])
+async def embed_text(text: str, **kwargs) -> list[float]:
+    vectors = await embed_texts([text], **kwargs)
     return vectors[0]
 
 
-async def index_module_content(module_id: int, course_id: int, content: str) -> None:
+async def index_module_content(
+    module_id: int, course_id: int, content: str, *, endpoint: str = "worker:generate_module_content"
+) -> None:
     chunks = chunk_text(content)
     if not chunks:
         return
-    embeddings = await embed_texts(chunks)
+    embeddings = await embed_texts(
+        chunks, purpose="indexing", endpoint=endpoint, course_id=course_id, module_id=module_id
+    )
     await replace_module_vectors(module_id, course_id, chunks, embeddings)

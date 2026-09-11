@@ -1,5 +1,7 @@
 # AI-Powered Adaptive Course Generation Platform
 
+[![CI](https://github.com/riyagmehta/AI-Powered-Adaptive-Course-Generation-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/riyagmehta/AI-Powered-Adaptive-Course-Generation-Platform/actions/workflows/ci.yml)
+
 An adaptive learning platform: describe what you want to learn, get a GPT-4-generated
 course outline, watch lessons finish generating in the background, ask questions
 answered with RAG over the lesson content, take generated quizzes, and have the
@@ -75,6 +77,10 @@ this design (see `backend/app/worker.py` and `backend/tests/test_generation_work
 - **AI**: OpenAI (`gpt-4o-mini` for chat/JSON generation, `text-embedding-3-small` for embeddings), Pinecone (cosine, dim 1536)
 - **Frontend**: React + Vite + TypeScript + Tailwind v4, Zustand, React Router, Axios, Recharts
 - **Rate limiting**: slowapi, backed by Redis so limits hold across multiple worker processes
+- **Observability**: structlog (JSON logs, request-ID tracing across the ARQ boundary),
+  per-LLM-call cost/latency tracking, an admin metrics endpoint
+- **CI**: GitHub Actions — backend tests against real Postgres/Redis service containers,
+  frontend typecheck + build
 
 ## Project structure
 
@@ -165,10 +171,27 @@ Coverage includes:
   worker, Postgres, Redis, OpenAI, and Pinecone — including actually `docker kill -9`-ing
   the worker mid-job and watching it recover on restart.
 - The existing RAG pipeline and doubt-resolution tests.
+- Observability (`tests/test_observability.py`, `tests/test_admin_metrics.py`): the
+  request-ID middleware generates one when absent and echoes back an inbound one
+  unchanged; a non-admin gets a 403 from `/admin/metrics`, an unauthenticated caller
+  gets a 401, and an admin sees a real (fake_openai-mocked) LLM call correctly rolled
+  up by user, course, and endpoint.
 
 `pytest` doesn't include the RAG evaluation harness (`tests/eval/`) — it costs real
 OpenAI/Pinecone calls and reports quality metrics rather than pass/fail, so it's a
 separate script; see "RAG evaluation" below.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and PR: the backend job spins up real
+Postgres and Redis service containers, runs migrations, and runs the full `pytest`
+suite against them; the frontend job runs `tsc -b` and `npm run build`.
+
+`test_rag_pipeline.py` and `test_doubts_endpoint.py` query a real Pinecone index
+(only the OpenAI side is mocked) — for the backend job to fully pass, add
+`PINECONE_API_KEY` and `PINECONE_INDEX_NAME` as repo secrets (**Settings → Secrets
+and variables → Actions**). Without them those two test files fail with a Pinecone
+auth error; everything else still passes.
 
 ## Rate limiting
 
@@ -185,6 +208,76 @@ Redis so the limits are shared across multiple worker processes:
 
 A request over the limit gets a `429` with `{"error": "Rate limit exceeded: ..."}`,
 which the frontend surfaces as a toast rather than a page-level error.
+
+## Observability
+
+### Structured logging + request tracing
+
+Every log line — ours, uvicorn's, sqlalchemy's, httpx's, arq's — is JSON
+(`app/observability/logging_config.py`, stdlib `logging` routed through
+structlog's `ProcessorFormatter`). `RequestIDMiddleware` binds a request ID
+into structlog's contextvars for the life of each request (reusing an inbound
+`X-Request-ID` header if present, otherwise minting one, and always returning
+it in the response), so it's automatically attached to every log line emitted
+while handling that request — no need to pass it around manually.
+
+That includes across the async boundary into the ARQ worker: when
+`POST /courses` or `POST /modules/{id}/generate` enqueues a generation job, the
+request ID (and the triggering endpoint) rides along as job arguments, and
+`generate_module_content_task` binds them for its own duration. The result —
+verified live, not just in theory — is that one `request_id` ties together the
+original HTTP request's log line, the job's log lines, the LLM call it made,
+and even the underlying `httpx` request log to OpenAI:
+
+```json
+{"event": "llm_call", "purpose": "content", "endpoint": "POST /courses", "model": "gpt-4o-mini", "prompt_tokens": 142, "completion_tokens": 846, "cost_usd": 0.0005289, "latency_ms": 6965.4, "cache_hit": false, "user_id": 251, "course_id": 245, "module_id": 311, "job_id": 43, "request_id": "536a100458144ae88f4d3befe8e61e4f"}
+```
+
+### Per-LLM-call cost tracking
+
+Every real chat-completion or embedding call — outline synthesis, module
+content generation, doubt Q&A (including a separate zero-cost row for cache
+hits, so hit rate stays visible), quiz generation, and RAG indexing — goes
+through `app/services/llm_metrics.py` rather than calling the OpenAI client
+directly. Each call is logged as structured JSON *and* written to an
+`llm_calls` table: model, prompt/completion tokens, a computed USD cost (from
+a small per-model pricing table — update it if OpenAI's pricing changes),
+latency, cache hit/miss, and whichever of user/course/module apply.
+
+`GET /admin/metrics` (admin-only — see below) aggregates it: total cost, cost
+by user, by course, by endpoint (with cache hit rate), a daily time series,
+and `?days=N` to change the window (default 30).
+
+### Route latency (p50/p95)
+
+`TimingMiddleware` records every request's duration into a capped, per-route
+Redis list (`latency:{method}:{route}`, most recent 500 samples) — Redis
+rather than in-process memory so the numbers stay correct with multiple
+worker processes or replicas. `GET /admin/metrics` reads these back and
+reports p50/p95 per route alongside the cost breakdown.
+
+### Admin access
+
+`GET /admin/metrics` requires `current_user.is_admin` (403 otherwise) — there's
+no admin UI, so promote a user directly:
+
+```bash
+cd backend && source venv/bin/activate
+python -c "
+import asyncio
+from sqlalchemy import select
+from app.database import AsyncSessionLocal
+from app.models.user import User
+
+async def main():
+    async with AsyncSessionLocal() as db:
+        user = (await db.execute(select(User).where(User.email == 'you@example.com'))).scalar_one()
+        user.is_admin = True
+        await db.commit()
+
+asyncio.run(main())
+"
+```
 
 ## RAG evaluation
 
@@ -307,8 +400,14 @@ docker build -t course-platform-backend .
 docker run --env-file .env -p 8000:8000 course-platform-backend
 
 # Worker — processes module-generation jobs, no HTTP server, no migrations
-docker run --env-file .env course-platform-backend arq app.worker.WorkerSettings
+docker run --env-file .env course-platform-backend \
+  arq app.worker.WorkerSettings --custom-log-dict app.worker.ARQ_LOG_CONFIG
 ```
+
+The `--custom-log-dict` flag matters: the `arq` CLI unconditionally attaches its own
+plain-text log handler on startup, which would otherwise print every worker log line
+twice (once as JSON, once as arq's own text format) alongside the structured logging
+setup above.
 
 The API's default command runs `alembic upgrade head` before starting `uvicorn` —
 run only one instance of that per deploy (or otherwise ensure migrations only apply
@@ -379,9 +478,12 @@ command:
 1. In the project canvas, **+ New → GitHub Repo** → select this repo again. This
    creates a second, independent service from the same source.
 2. **Settings → Source → Root Directory** = `backend` (same as the API service).
-3. **Settings → Deploy → Custom Start Command** = `arq app.worker.WorkerSettings` —
+3. **Settings → Deploy → Custom Start Command** =
+   `arq app.worker.WorkerSettings --custom-log-dict app.worker.ARQ_LOG_CONFIG` —
    this replaces the Dockerfile's default command (which runs migrations + `uvicorn`,
-   and isn't what you want here) for this service only.
+   and isn't what you want here) for this service only. The `--custom-log-dict` flag
+   stops `arq`'s own logging setup from double-printing every log line (see
+   "Observability" above).
 4. **Settings → Deploy → Healthcheck Path** — clear it if `backend/railway.json` has
    populated it with `/health`. The worker doesn't serve HTTP at all, so an HTTP
    healthcheck here will just fail and crash-loop a perfectly healthy worker.

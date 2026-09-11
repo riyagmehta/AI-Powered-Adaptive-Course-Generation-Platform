@@ -67,7 +67,13 @@ async def create_course(
         job = GenerationJob(module_id=first_module.id, status="queued")
         db.add(job)
         await db.commit()
-        await arq_pool.enqueue_job("generate_module_content_task", job.id, first_module.id)
+        await arq_pool.enqueue_job(
+            "generate_module_content_task",
+            job.id,
+            first_module.id,
+            request_id=getattr(request.state, "request_id", None),
+            endpoint="POST /courses",
+        )
 
     return course
 

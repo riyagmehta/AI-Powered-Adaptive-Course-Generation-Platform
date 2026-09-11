@@ -51,7 +51,7 @@ async def create_doubt(
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
-            async for event in resolve_doubt(module, question):
+            async for event in resolve_doubt(module, question, user_id=current_user.id):
                 if event["type"] == "chunk":
                     yield _sse("chunk", {"delta": event["delta"]})
                     continue

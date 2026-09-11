@@ -70,7 +70,13 @@ async def generate_module(
     await db.commit()
     await db.refresh(job)
 
-    await arq_pool.enqueue_job("generate_module_content_task", job.id, module_id)
+    await arq_pool.enqueue_job(
+        "generate_module_content_task",
+        job.id,
+        module_id,
+        request_id=getattr(request.state, "request_id", None),
+        endpoint="POST /modules/{module_id}/generate",
+    )
 
     return job
 

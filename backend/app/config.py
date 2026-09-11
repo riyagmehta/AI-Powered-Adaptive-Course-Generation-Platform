@@ -62,5 +62,9 @@ class Settings(BaseSettings):
     doubt_cache_ttl_seconds: int = 3600
     doubt_retrieval_top_k: int = 5
 
+    # Observability
+    log_level: str = "INFO"
+    json_logs: bool = True
+
 
 settings = Settings()

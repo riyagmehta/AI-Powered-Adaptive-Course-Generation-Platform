@@ -1,7 +1,7 @@
 from app.config import settings
 from app.models.course import Course
 from app.models.module import Module
-from app.services.ai_client import client
+from app.services.llm_metrics import instrumented_chat_completion
 
 DIFFICULTY_INSTRUCTIONS = {
     "beginner": (
@@ -37,10 +37,17 @@ def build_user_prompt(module: Module) -> str:
     )
 
 
-async def generate_module_content(course: Course, module: Module) -> str:
+async def generate_module_content(
+    course: Course, module: Module, *, endpoint: str = "worker:generate_module_content"
+) -> str:
     """Single non-streaming completion — this runs inside a durable ARQ job, not
     a live HTTP request, so there's no client connection to stream tokens to."""
-    response = await client.chat.completions.create(
+    response = await instrumented_chat_completion(
+        purpose="content",
+        endpoint=endpoint,
+        user_id=getattr(course, "owner_id", None),
+        course_id=getattr(course, "id", None),
+        module_id=getattr(module, "id", None),
         model=settings.openai_chat_model,
         temperature=0.7,
         messages=[

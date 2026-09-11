@@ -3,7 +3,7 @@ import json
 from app.config import settings
 from app.models.course import Course
 from app.models.module import Module
-from app.services.ai_client import client
+from app.services.llm_metrics import instrumented_chat_completion
 
 DIFFICULTY_LEVELS = ["beginner", "intermediate", "advanced"]
 DEFAULT_DIFFICULTY = "intermediate"
@@ -42,8 +42,13 @@ def _build_user_prompt(module: Module, difficulty: str) -> str:
     )
 
 
-async def generate_quiz_questions(module: Module, difficulty: str) -> list[dict]:
-    response = await client.chat.completions.create(
+async def generate_quiz_questions(module: Module, difficulty: str, *, user_id: int | None = None) -> list[dict]:
+    response = await instrumented_chat_completion(
+        purpose="quiz",
+        endpoint="POST /modules/{module_id}/quiz",
+        user_id=user_id,
+        course_id=getattr(module, "course_id", None),
+        module_id=getattr(module, "id", None),
         model=settings.openai_chat_model,
         response_format={"type": "json_object"},
         temperature=0.7,

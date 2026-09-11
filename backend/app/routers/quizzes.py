@@ -43,7 +43,7 @@ async def create_quiz(
         )
 
     difficulty = module.course.current_difficulty
-    questions = await generate_quiz_questions(module, difficulty)
+    questions = await generate_quiz_questions(module, difficulty, user_id=current_user.id)
 
     quiz = Quiz(module_id=module.id, questions=questions, difficulty=difficulty)
     db.add(quiz)

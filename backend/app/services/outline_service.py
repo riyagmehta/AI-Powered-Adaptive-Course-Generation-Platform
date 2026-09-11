@@ -2,7 +2,7 @@ import json
 
 from app.config import settings
 from app.models.user import User
-from app.services.ai_client import client
+from app.services.llm_metrics import instrumented_chat_completion
 
 OUTLINE_SYSTEM_PROMPT = """You are a curriculum designer for an adaptive online learning platform.
 Given a learner's profile and a topic, design a course outline.
@@ -35,7 +35,10 @@ def _build_user_prompt(user: User, topic: str | None, num_modules: int) -> str:
 
 
 async def synthesize_outline(user: User, topic: str | None, num_modules: int) -> dict:
-    response = await client.chat.completions.create(
+    response = await instrumented_chat_completion(
+        purpose="outline",
+        endpoint="POST /courses",
+        user_id=getattr(user, "id", None),
         model=settings.openai_chat_model,
         response_format={"type": "json_object"},
         temperature=0.7,

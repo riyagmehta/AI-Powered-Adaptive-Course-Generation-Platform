@@ -10,8 +10,12 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
-from app.routers import analytics, auth, courses, doubts, modules, quizzes
+from app.observability.logging_config import configure_logging
+from app.observability.middleware import RequestIDMiddleware, TimingMiddleware
+from app.routers import admin, analytics, auth, courses, doubts, modules, quizzes
 from app.services.rate_limit import limiter
+
+configure_logging()
 
 
 @asynccontextmanager
@@ -37,12 +41,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Added in this order so RequestIDMiddleware ends up outermost (Starlette
+# wraps each added middleware around the previous stack) — it needs to bind
+# the request ID into structlog's contextvars before TimingMiddleware's
+# "request_completed" log line is emitted, so that line carries it too.
+app.add_middleware(TimingMiddleware)
+app.add_middleware(RequestIDMiddleware)
+
 app.include_router(auth.router)
 app.include_router(courses.router)
 app.include_router(modules.router)
 app.include_router(doubts.router)
 app.include_router(quizzes.router)
 app.include_router(analytics.router)
+app.include_router(admin.router)
 
 
 @app.get("/health")
