@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -57,6 +59,16 @@ async def stream_module(
             async for delta in stream_module_content(course, module):
                 chunks.append(delta)
                 yield _sse("chunk", {"delta": delta})
+        except asyncio.CancelledError:
+            # Client disconnected or aborted (e.g. navigated away mid-stream).
+            # Revert to "pending" so the module can be regenerated instead of
+            # getting stuck in "generating" forever. Shielded because the
+            # enclosing scope is already cancelled.
+            with anyio.CancelScope(shield=True):
+                module.status = "pending"
+                db.add(module)
+                await db.commit()
+            raise
         except Exception as exc:
             module.status = "failed"
             db.add(module)
