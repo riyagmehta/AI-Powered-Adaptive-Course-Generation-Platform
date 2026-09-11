@@ -1,16 +1,16 @@
 # AI-Powered Adaptive Course Generation Platform
 
 An adaptive learning platform: describe what you want to learn, get a GPT-4-generated
-course outline, read lessons as they're generated live, ask questions answered with
-RAG over the lesson content, take generated quizzes, and have the course's difficulty
-recalibrate itself based on how you score.
+course outline, watch lessons finish generating in the background, ask questions
+answered with RAG over the lesson content, take generated quizzes, and have the
+course's difficulty recalibrate itself based on how you score.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     A[Onboarding] --> B[Outline synthesis\nGPT-4, JSON mode]
-    B --> C[Module content\nSSE stream, GPT-4]
+    B --> C[Module content\ndurable ARQ job]
     C --> D[Quiz generation\nGPT-4, JSON mode]
     D --> E[Quiz attempt\nscored + explained]
     E -->|"score >= 80 promotes\nscore < 50 demotes"| B
@@ -29,9 +29,48 @@ flowchart LR
     SSE --> Save[Cache in Redis]
 ```
 
+### Module content generation: a durable job, not a request
+
+Generating a module's content and indexing it for RAG can take long enough, and calls
+enough external services (OpenAI, then Pinecone), that tying it to a single HTTP
+request/connection isn't reliable — a dropped connection or a redeployed API pod
+shouldn't lose the work. So it runs as an [ARQ](https://arq-docs.helpmanual.io/)
+(Redis-backed, async-native) job in a separate worker process instead:
+
+```mermaid
+flowchart LR
+    A["POST /modules/{id}/generate"] --> B[(generation_jobs row\nstatus=queued)]
+    B --> C[ARQ worker picks it up]
+    C --> D{module already\ncompleted?}
+    D -->|yes| E[succeeded — no-op,\nno OpenAI/Pinecone calls]
+    D -->|no| F[generate content,\nthen index it]
+    F -->|success| G[one commit:\ncontent saved + succeeded]
+    F -->|failure, attempt < 3| H[queued again,\nbackoff 2^attempt seconds]
+    H --> C
+    F -->|failure, attempt = 3| I[failed, real error\nrecorded on the job row]
+```
+
+The frontend polls `GET /modules/{id}/status` instead of guessing when the content
+will be ready. A few properties worth calling out, since they're the actual point of
+this design (see `backend/app/worker.py` and `backend/tests/test_generation_worker.py`):
+
+- **Idempotent**: the task checks whether the module is already `"completed"` before
+  doing any work. A duplicate delivery of the same job, or a job requeued after a
+  crash that actually finished, is a no-op — no repeat OpenAI/Pinecone calls.
+- **No partial state**: `module.content` and `module.status = "completed"` are only
+  written in the single commit at the very end, after both the OpenAI call and the
+  Pinecone indexing have fully succeeded in memory. An interruption at any point
+  before that leaves the module's persisted state exactly as it was — never half a
+  lesson.
+- **Crash recovery**: if a worker process is killed mid-job, its row is left stuck in
+  `"running"` (nothing else would ever revisit it otherwise). On startup, every worker
+  scans for jobs stuck in `"running"` and requeues them.
+
 ## Stack
 
 - **Backend**: FastAPI (Python 3.11), async SQLAlchemy + asyncpg, Alembic migrations
+- **Jobs**: ARQ (Redis-backed) for durable, retryable module-generation jobs, run by a
+  separate worker process
 - **DB**: PostgreSQL 16, Redis 7 (both via Docker Compose)
 - **AI**: OpenAI (`gpt-4o-mini` for chat/JSON generation, `text-embedding-3-small` for embeddings), Pinecone (cosine, dim 1536)
 - **Frontend**: React + Vite + TypeScript + Tailwind v4, Zustand, React Router, Axios, Recharts
@@ -40,7 +79,7 @@ flowchart LR
 ## Project structure
 
 ```
-backend/    FastAPI app — app/{models,schemas,routers,services}, alembic/, tests/
+backend/    FastAPI app — app/{models,schemas,routers,services}, app/worker.py, alembic/, tests/
 frontend/   React app — src/{pages,components,store,lib,types}
 docs/       Screenshots referenced below
 ```
@@ -64,11 +103,18 @@ Fill in `OPENAI_API_KEY`, `PINECONE_API_KEY`, `PINECONE_INDEX_NAME`, and generat
 `JWT_SECRET_KEY` (e.g. `openssl rand -hex 32`). Leave the Postgres/Redis values as-is
 unless you've changed the Compose file.
 
-### 2. Databases
+### 2. Databases + worker
 
 ```bash
 docker compose up -d
 ```
+
+This starts Postgres, Redis, and the ARQ worker (`course_platform_worker`) that
+processes module-generation jobs. The worker connects to Postgres/Redis over the
+Compose network, so it needs migrations applied before it has anything to do — that
+happens in the next step. If you bring it up before then, it'll just crash-loop
+(`restart: unless-stopped`) until the `generation_jobs` table exists, then recover on
+its own.
 
 ### 3. Backend
 
@@ -80,7 +126,9 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-The API is now at `http://localhost:8000` (docs at `/docs`).
+The API is now at `http://localhost:8000` (docs at `/docs`). Course creation and
+`POST /modules/{id}/generate` enqueue jobs that the Compose worker picks up —
+`docker logs -f course_platform_worker` to watch it work.
 
 ### 4. Frontend
 
@@ -100,12 +148,22 @@ cd backend
 pytest -x
 ```
 
-Coverage includes the quiz scoring and difficulty-recalibration logic specifically
-(`tests/test_quiz_service.py` — pure unit tests for `score_attempt`/`recalibrate_difficulty`,
-including threshold edges and unanswered questions) plus an end-to-end attempt flow
-(`tests/test_quiz_attempt_endpoint.py`) that verifies a passing attempt promotes
-difficulty, a failing one demotes it, and both persist correctly — alongside the
-existing RAG pipeline and doubt-resolution tests.
+Coverage includes:
+- Quiz scoring and difficulty-recalibration logic (`tests/test_quiz_service.py` — pure
+  unit tests for `score_attempt`/`recalibrate_difficulty`, including threshold edges and
+  unanswered questions) plus an end-to-end attempt flow (`tests/test_quiz_attempt_endpoint.py`)
+  that verifies a passing attempt promotes difficulty, a failing one demotes it, and
+  both persist correctly.
+- The generation job queue (`tests/test_generation_worker.py`), calling the ARQ task
+  function directly: a job that's already `"running"` when the worker restarts gets
+  requeued by `on_startup` and then actually completes; a job whose OpenAI call always
+  fails retries twice with the expected backoff and lands in `"failed"` with the real
+  error recorded on its third attempt; and running the identical job twice against an
+  already-`"completed"` module is a no-op the second time (no repeat OpenAI/Pinecone
+  calls). These same three scenarios were also verified live against the real Docker
+  worker, Postgres, Redis, OpenAI, and Pinecone — including actually `docker kill -9`-ing
+  the worker mid-job and watching it recover on restart.
+- The existing RAG pipeline and doubt-resolution tests.
 
 ## Rate limiting
 
@@ -116,7 +174,7 @@ Redis so the limits are shared across multiple worker processes:
 | Endpoint | Limit |
 |---|---|
 | `POST /courses` (outline synthesis) | 5/minute |
-| `GET /modules/{id}/stream` (content generation) | 10/minute |
+| `POST /modules/{id}/generate` (enqueues content generation) | 10/minute |
 | `POST /modules/{id}/quiz` (quiz generation) | 10/minute |
 | `POST /doubts` (RAG Q&A) | 15/minute |
 
@@ -127,17 +185,28 @@ which the frontend surfaces as a toast rather than a page-level error.
 
 ### Backend (Docker, any host)
 
+The same image serves two roles — the API and the ARQ worker — selected by the
+container's start command:
+
 ```bash
 cd backend
 docker build -t course-platform-backend .
+
+# API — runs migrations, then serves HTTP
 docker run --env-file .env -p 8000:8000 course-platform-backend
+
+# Worker — processes module-generation jobs, no HTTP server, no migrations
+docker run --env-file .env course-platform-backend arq app.worker.WorkerSettings
 ```
 
-The image runs `alembic upgrade head` before starting `uvicorn`. Configuration comes
-entirely from real process environment variables (not a baked-in `.env` file), so pass
-them with `--env-file` / a compose `environment:` block. It respects `$PORT` (falls
-back to `8000`) and `$WEB_CONCURRENCY` (worker count, default `2`) for platforms that
-assign these dynamically.
+The API's default command runs `alembic upgrade head` before starting `uvicorn` —
+run only one instance of that per deploy (or otherwise ensure migrations only apply
+once) so multiple API replicas don't race each other on schema changes; the worker
+command never touches migrations, so it's safe to run as many worker replicas as you
+want. Configuration comes entirely from real process environment variables (not a
+baked-in `.env` file), so pass them with `--env-file` / a compose `environment:` block.
+The API command respects `$PORT` (falls back to `8000`) and `$WEB_CONCURRENCY`
+(worker count, default `2`) for platforms that assign these dynamically.
 
 ### Deploying to Railway (backend) + Vercel (frontend)
 
@@ -160,10 +229,10 @@ directly in the Railway or Vercel dashboard.
 
 #### 2. Railway: configure the backend service's environment variables
 
-Open the backend service → **Variables** tab and add each of these. For `DATABASE_URL`
-and `REDIS_URL`, use Railway's variable reference picker (type `${{` and it will
-autocomplete the other services' variables) instead of copy-pasting values — that way
-they stay in sync if the database ever moves.
+Open the backend (API) service → **Variables** tab and add each of these. For
+`DATABASE_URL` and `REDIS_URL`, use Railway's variable reference picker (type `${{` and
+it will autocomplete the other services' variables) instead of copy-pasting values —
+that way they stay in sync if the database ever moves.
 
 | Variable | Value |
 |---|---|
@@ -173,7 +242,7 @@ they stay in sync if the database ever moves.
 | `OPENAI_API_KEY` | your OpenAI key, set directly in this dashboard |
 | `PINECONE_API_KEY` | your Pinecone key, set directly in this dashboard |
 | `PINECONE_INDEX_NAME` | your Pinecone index name |
-| `CORS_ORIGINS` | placeholder for now, e.g. `https://placeholder.vercel.app` — you'll update this in step 4 once the real Vercel URL exists |
+| `CORS_ORIGINS` | placeholder for now, e.g. `https://placeholder.vercel.app` — you'll update this in step 5 once the real Vercel URL exists |
 
 Notes:
 - `DATABASE_URL` from Railway's Postgres plugin comes as a plain `postgresql://` URL;
@@ -189,13 +258,40 @@ Railway will redeploy automatically once the required variables are in place. Wa
 **Deployments** tab for the build/deploy logs — you should see the Alembic migration
 output followed by `Uvicorn running on http://0.0.0.0:$PORT`.
 
-#### 3. Railway: get a public URL for the backend
+#### 3. Railway: add the worker as a second service
 
-Open **Settings → Networking** and click **Generate Domain** if one wasn't created
-automatically. Copy the resulting `https://<something>.up.railway.app` URL — you'll
-need it for the frontend and to test the API (e.g. `curl https://<that-url>/health`).
+Module generation won't actually run without a worker — the API only enqueues jobs.
+Add it as its own service in the **same** Railway project (so it shares the Postgres
+and Redis you already created), pointed at the same repo but with a different start
+command:
 
-#### 4. Vercel: deploy the frontend
+1. In the project canvas, **+ New → GitHub Repo** → select this repo again. This
+   creates a second, independent service from the same source.
+2. **Settings → Source → Root Directory** = `backend` (same as the API service).
+3. **Settings → Deploy → Custom Start Command** = `arq app.worker.WorkerSettings` —
+   this replaces the Dockerfile's default command (which runs migrations + `uvicorn`,
+   and isn't what you want here) for this service only.
+4. **Settings → Deploy → Healthcheck Path** — clear it if `backend/railway.json` has
+   populated it with `/health`. The worker doesn't serve HTTP at all, so an HTTP
+   healthcheck here will just fail and crash-loop a perfectly healthy worker.
+5. **Variables**: add `DATABASE_URL` and `REDIS_URL` as the same `${{Postgres...}}` /
+   `${{Redis...}}` references from step 2, plus `OPENAI_API_KEY`, `PINECONE_API_KEY`,
+   and `PINECONE_INDEX_NAME` with the same values as the API service. (Railway's
+   project-level **Shared Variables** are worth using here instead of retyping these —
+   set them once at the project level and reference them from both services.)
+
+Watch this service's **Deployments** log for `Starting worker for 1 functions:
+generate_module_content_task` — that confirms it's up and polling Redis.
+
+#### 4. Railway: get a public URL for the backend
+
+Open the **API** service's **Settings → Networking** and click **Generate Domain** if
+one wasn't created automatically. Copy the resulting `https://<something>.up.railway.app`
+URL — you'll need it for the frontend and to test the API (e.g.
+`curl https://<that-url>/health`). The worker service has no public URL and doesn't
+need one.
+
+#### 5. Vercel: deploy the frontend
 
 1. Go to [vercel.com](https://vercel.com), sign in with GitHub, and authorize access to
    this repository.
@@ -204,7 +300,7 @@ need it for the frontend and to test the API (e.g. `curl https://<that-url>/heal
    `frontend`. Vercel should auto-detect the **Vite** framework preset (build command
    `npm run build`, output directory `dist`) — leave those as detected.
 4. Expand **Environment Variables** and add:
-   - `VITE_API_URL` = the Railway URL from step 3 (no trailing slash), e.g.
+   - `VITE_API_URL` = the Railway URL from step 4 (no trailing slash), e.g.
      `https://your-service.up.railway.app`
 5. Click **Deploy**.
 6. Once it's live, copy the production URL Vercel gives you (`https://your-project.vercel.app`).
@@ -213,10 +309,10 @@ need it for the frontend and to test the API (e.g. `curl https://<that-url>/heal
 client-side routes like `/dashboard` or `/courses/12` don't 404 on a hard refresh —
 no action needed there.
 
-#### 5. Close the loop: point the backend's CORS at the real frontend URL
+#### 6. Close the loop: point the backend's CORS at the real frontend URL
 
-Back in Railway → backend service → **Variables**, update `CORS_ORIGINS` to the exact
-Vercel URL from step 4 (comma-separate more than one, e.g. if you later add a custom
+Back in Railway → **API** service → **Variables**, update `CORS_ORIGINS` to the exact
+Vercel URL from step 5 (comma-separate more than one, e.g. if you later add a custom
 domain):
 
 ```
@@ -239,8 +335,8 @@ real outline generation:
 ![Register](docs/screenshots/01-register.png)
 ![Onboarding](docs/screenshots/02-onboarding.png)
 
-**Course view** — module sidebar with status badges, and lesson content rendered live
-as it streams in from GPT-4:
+**Course view** — module sidebar with status badges tracking each module's generation
+job, and lesson content rendered once the background job finishes:
 
 ![Course content](docs/screenshots/03-course-content.png)
 

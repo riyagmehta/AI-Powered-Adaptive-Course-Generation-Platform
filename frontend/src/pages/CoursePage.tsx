@@ -4,27 +4,83 @@ import { ContentReader } from '../components/ContentReader'
 import { DoubtDrawer, type DoubtHistoryItem } from '../components/DoubtDrawer'
 import { ModuleSidebar } from '../components/ModuleSidebar'
 import { NavBar } from '../components/NavBar'
-import { api, apiUrl } from '../lib/api'
-import { SSEHttpError, streamSSE } from '../lib/sse'
+import { api } from '../lib/api'
+import { extractErrorMessage } from '../store/authStore'
 import { toast } from '../store/toastStore'
-import type { CourseDetail } from '../types/api'
+import type { CourseDetail, GenerationJobRead } from '../types/api'
+
+const POLL_INTERVAL_MS = 1500
 
 export function CoursePage() {
   const { courseId } = useParams<{ courseId: string }>()
   const [course, setCourse] = useState<CourseDetail | null>(null)
   const [selectedModuleId, setSelectedModuleId] = useState<number | null>(null)
   const [content, setContent] = useState('')
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [streamError, setStreamError] = useState<string | null>(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [generationError, setGenerationError] = useState<string | null>(null)
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
   const [doubtHistory, setDoubtHistory] = useState<Record<number, DoubtHistoryItem[]>>({})
-  const abortRef = useRef<AbortController | null>(null)
+  const cancelledRef = useRef(false)
 
   const fetchCourse = useCallback(async () => {
     const { data } = await api.get<CourseDetail>(`/courses/${courseId}`)
     setCourse(data)
     return data
   }, [courseId])
+
+  // Content generation is a durable background job (see backend/app/worker.py),
+  // not something tied to this request/connection — so instead of streaming
+  // tokens live, we kick off (or join) a job and poll GET /modules/{id}/status
+  // until it's done, then fetch the finished content.
+  const pollUntilDone = useCallback(
+    async (moduleId: number) => {
+      while (!cancelledRef.current) {
+        const { data: job } = await api.get<GenerationJobRead>(`/modules/${moduleId}/status`)
+        if (cancelledRef.current) return
+
+        if (job.status === 'succeeded') {
+          const data = await fetchCourse()
+          const module = data.modules.find((m) => m.id === moduleId)
+          setContent(module?.content ?? '')
+          setIsGenerating(false)
+          return
+        }
+        if (job.status === 'failed') {
+          await fetchCourse() // refresh the sidebar badge to "failed" too
+          setGenerationError(job.last_error ?? 'Module generation failed.')
+          toast.error('Module generation failed.')
+          setIsGenerating(false)
+          return
+        }
+
+        // Keep the sidebar's status badge (pending/generating) in sync while
+        // we wait, not just at the very end.
+        await fetchCourse()
+        await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+      }
+    },
+    [fetchCourse],
+  )
+
+  const startGeneration = useCallback(
+    async (moduleId: number) => {
+      setGenerationError(null)
+      setIsGenerating(true)
+      try {
+        // Idempotent: a no-op if a job is already queued/running/succeeded.
+        await api.post(`/modules/${moduleId}/generate`)
+      } catch (err) {
+        if (cancelledRef.current) return
+        const message = extractErrorMessage(err)
+        setGenerationError(message)
+        toast.error(message)
+        setIsGenerating(false)
+        return
+      }
+      await pollUntilDone(moduleId)
+    },
+    [pollUntilDone],
+  )
 
   useEffect(() => {
     fetchCourse().then((data) => {
@@ -37,78 +93,27 @@ export function CoursePage() {
   useEffect(() => {
     if (selectedModuleId === null) return
 
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-    let pollTimer: ReturnType<typeof setTimeout> | undefined
-
+    cancelledRef.current = false
     setContent('')
-    setStreamError(null)
-    setIsStreaming(true)
+    setGenerationError(null)
+    setIsGenerating(false)
 
-    // A background task on the server may already be generating the first
-    // module of a freshly created course. If so, the stream endpoint returns
-    // 409 — fall back to polling the course until that generation finishes.
-    async function pollUntilReady() {
-      while (!controller.signal.aborted) {
-        const data = await fetchCourse()
-        const module = data.modules.find((m) => m.id === selectedModuleId)
-        if (!module) return
-        if (module.status === 'completed') {
-          setContent(module.content ?? '')
-          setIsStreaming(false)
-          return
-        }
-        if (module.status === 'failed') {
-          setStreamError('Module generation failed. Please try again.')
-          toast.error(`"${module.title}" failed to generate.`)
-          setIsStreaming(false)
-          return
-        }
-        await new Promise<void>((resolve) => {
-          pollTimer = setTimeout(resolve, 1500)
-        })
+    fetchCourse().then((data) => {
+      if (cancelledRef.current) return
+      const module = data.modules.find((m) => m.id === selectedModuleId)
+      if (!module) return
+
+      if (module.status === 'completed') {
+        setContent(module.content ?? '')
+        return
       }
-    }
-
-    async function run() {
-      try {
-        await streamSSE(apiUrl(`/modules/${selectedModuleId}/stream`), {
-          signal: controller.signal,
-          onEvent: ({ event, data }) => {
-            if (event === 'chunk') {
-              setContent((prev) => prev + (data.delta as string))
-            } else if (event === 'done') {
-              setIsStreaming(false)
-              fetchCourse()
-            } else if (event === 'error') {
-              setStreamError(data.detail as string)
-              toast.error(data.detail as string)
-              setIsStreaming(false)
-            }
-          },
-        })
-      } catch (err) {
-        if (controller.signal.aborted) return
-        if (err instanceof SSEHttpError && err.status === 409) {
-          await pollUntilReady()
-          return
-        }
-        const message = err instanceof Error ? err.message : 'Failed to load content.'
-        setStreamError(message)
-        toast.error(message)
-        setIsStreaming(false)
-      }
-    }
-
-    run()
+      startGeneration(selectedModuleId)
+    })
 
     return () => {
-      controller.abort()
-      if (pollTimer) clearTimeout(pollTimer)
+      cancelledRef.current = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedModuleId])
+  }, [selectedModuleId, fetchCourse, startGeneration])
 
   if (!course) {
     return (
@@ -171,7 +176,12 @@ export function CoursePage() {
             </div>
           )}
 
-          <ContentReader content={content} isStreaming={isStreaming} error={streamError} />
+          <ContentReader
+            content={content}
+            isGenerating={isGenerating}
+            error={generationError}
+            onRetry={() => selectedModuleId !== null && startGeneration(selectedModuleId)}
+          />
         </main>
       </div>
 

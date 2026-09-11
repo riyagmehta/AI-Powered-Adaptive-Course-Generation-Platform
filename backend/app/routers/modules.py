@@ -1,94 +1,91 @@
-import asyncio
-import json
-import logging
-from collections.abc import AsyncGenerator
-
-import anyio
+from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from app.models.generation_job import GenerationJob
 from app.models.module import Module
 from app.models.user import User
+from app.schemas.generation_job import GenerationJobRead
 from app.services.auth_service import get_current_user
-from app.services.content_service import stream_module_content
-from app.services.embedding_service import index_module_content
+from app.services.job_queue import get_arq_pool
 from app.services.rate_limit import limiter
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/modules", tags=["modules"])
 
-
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+ACTIVE_JOB_STATUSES = ("queued", "running")
 
 
-@router.get("/{module_id}/stream")
-@limiter.limit("10/minute")
-async def stream_module(
-    request: Request,
-    module_id: int,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> StreamingResponse:
+async def _get_owned_module(module_id: int, current_user: User, db: AsyncSession) -> Module:
     result = await db.execute(
         select(Module).where(Module.id == module_id).options(selectinload(Module.course))
     )
     module = result.scalar_one_or_none()
     if module is None or module.course.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Module not found")
+    return module
 
-    if module.status == "generating":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Module is already generating")
 
-    course = module.course
+async def _latest_job(db: AsyncSession, module_id: int) -> GenerationJob | None:
+    result = await db.execute(
+        select(GenerationJob)
+        .where(GenerationJob.module_id == module_id)
+        .order_by(GenerationJob.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
-    async def event_stream() -> AsyncGenerator[str, None]:
-        if module.status == "completed" and module.content:
-            yield _sse("chunk", {"delta": module.content})
-            yield _sse("done", {"module_id": module.id, "status": module.status})
-            return
 
-        module.status = "generating"
-        db.add(module)
+@router.post(
+    "/{module_id}/generate", response_model=GenerationJobRead, status_code=status.HTTP_202_ACCEPTED
+)
+@limiter.limit("10/minute")
+async def generate_module(
+    request: Request,
+    module_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    arq_pool: ArqRedis = Depends(get_arq_pool),
+) -> GenerationJob:
+    module = await _get_owned_module(module_id, current_user, db)
+
+    # Idempotent at the API layer too: don't enqueue a second job while one is
+    # already in flight, and don't re-enqueue at all once the module is done.
+    existing = await _latest_job(db, module_id)
+    if module.status == "completed" or (existing and existing.status in ACTIVE_JOB_STATUSES):
+        if existing is not None:
+            return existing
+        # Completed via some other path with no job row on record (shouldn't
+        # normally happen) — synthesize a terminal one for a uniform response.
+        job = GenerationJob(module_id=module_id, status="succeeded", attempts=0)
+        db.add(job)
         await db.commit()
+        await db.refresh(job)
+        return job
 
-        chunks: list[str] = []
-        try:
-            async for delta in stream_module_content(course, module):
-                chunks.append(delta)
-                yield _sse("chunk", {"delta": delta})
-        except asyncio.CancelledError:
-            # Client disconnected or aborted (e.g. navigated away mid-stream).
-            # Revert to "pending" so the module can be regenerated instead of
-            # getting stuck in "generating" forever. Shielded because the
-            # enclosing scope is already cancelled.
-            with anyio.CancelScope(shield=True):
-                module.status = "pending"
-                db.add(module)
-                await db.commit()
-            raise
-        except Exception as exc:
-            module.status = "failed"
-            db.add(module)
-            await db.commit()
-            yield _sse("error", {"detail": str(exc)})
-            return
+    job = GenerationJob(module_id=module_id, status="queued")
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-        module.content = "".join(chunks)
-        module.status = "completed"
-        db.add(module)
-        await db.commit()
+    await arq_pool.enqueue_job("generate_module_content_task", job.id, module_id)
 
-        try:
-            await index_module_content(module.id, course.id, module.content)
-        except Exception:
-            logger.exception("Failed to index module %s content for RAG", module.id)
+    return job
 
-        yield _sse("done", {"module_id": module.id, "status": module.status})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+@router.get("/{module_id}/status", response_model=GenerationJobRead)
+async def get_module_status(
+    module_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> GenerationJob:
+    await _get_owned_module(module_id, current_user, db)
+
+    job = await _latest_job(db, module_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No generation job found for this module yet"
+        )
+    return job

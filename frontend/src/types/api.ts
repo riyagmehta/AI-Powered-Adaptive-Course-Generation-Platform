@@ -40,6 +40,19 @@ export interface ModuleDetail extends ModuleSummary {
   content: string | null
 }
 
+export type GenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+
+export interface GenerationJobRead {
+  id: number
+  module_id: number
+  status: GenerationJobStatus
+  attempts: number
+  last_error: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
 export interface CourseRead {
   id: number
   title: string

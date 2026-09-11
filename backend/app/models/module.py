@@ -30,3 +30,6 @@ class Module(Base):
     doubts: Mapped[list["Doubt"]] = relationship(
         back_populates="module", cascade="all, delete-orphan"
     )
+    generation_jobs: Mapped[list["GenerationJob"]] = relationship(
+        back_populates="module", cascade="all, delete-orphan"
+    )

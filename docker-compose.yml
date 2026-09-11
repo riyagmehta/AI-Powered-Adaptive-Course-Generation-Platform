@@ -31,6 +31,28 @@ services:
       timeout: 5s
       retries: 5
 
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: course_platform_worker
+    restart: unless-stopped
+    command: ["arq", "app.worker.WorkerSettings"]
+    env_file:
+      - .env
+    environment:
+      # Overrides .env's host-oriented values (localhost:5433/6379, for the
+      # natively-run `uvicorn` dev process) with this compose network's
+      # internal service DNS names/ports, since this worker runs as a
+      # container alongside postgres/redis rather than on the host.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-course_platform}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:

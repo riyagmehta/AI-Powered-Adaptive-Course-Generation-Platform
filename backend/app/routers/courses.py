@@ -1,15 +1,17 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from arq.connections import ArqRedis
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.course import Course
+from app.models.generation_job import GenerationJob
 from app.models.module import Module
 from app.models.user import User
 from app.schemas.course import CourseCreate, CourseDetail, CourseRead
 from app.services.auth_service import get_current_user
-from app.services.content_service import generate_and_save_first_module
+from app.services.job_queue import get_arq_pool
 from app.services.outline_service import OutlineGenerationError, synthesize_outline
 from app.services.rate_limit import limiter
 
@@ -27,9 +29,9 @@ DIFFICULTY_BY_EXPERIENCE = {
 async def create_course(
     request: Request,
     payload: CourseCreate,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    arq_pool: ArqRedis = Depends(get_arq_pool),
 ) -> Course:
     if not payload.topic and not current_user.learning_goal:
         raise HTTPException(
@@ -60,7 +62,12 @@ async def create_course(
     db.add(course)
     await db.commit()
 
-    background_tasks.add_task(generate_and_save_first_module, course.id)
+    first_module = course.modules[0] if course.modules else None
+    if first_module is not None:
+        job = GenerationJob(module_id=first_module.id, status="queued")
+        db.add(job)
+        await db.commit()
+        await arq_pool.enqueue_job("generate_module_content_task", job.id, first_module.id)
 
     return course
 
