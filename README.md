@@ -414,14 +414,16 @@ isn't required to re-run the eval.
 
 ### Backend (Docker, any host)
 
-The same image serves two roles, the API and the ARQ worker, selected by the
+The same image can serve two roles, the API and the ARQ worker, selected by the
 container's start command:
 
 ```bash
 cd backend
 docker build -t course-platform-backend .
 
-# API: runs migrations, then serves HTTP
+# API: runs migrations, then serves HTTP. Add -e RUN_WORKER_IN_PROCESS=true to
+# also run the ARQ worker inside this same process (see below) instead of as
+# a separate container.
 docker run --env-file .env -p 8000:8000 course-platform-backend
 
 # Worker: processes module-generation jobs, no HTTP server, no migrations
@@ -437,55 +439,71 @@ entirely from real process environment variables (`--env-file` / a compose
 `environment:` block), and the API respects `$PORT` and `$WEB_CONCURRENCY` for
 platforms that assign these dynamically.
 
+`RUN_WORKER_IN_PROCESS` (default `false`) is for platforms with no separate
+background-worker service type: it makes the API's FastAPI lifespan
+(`app/main.py`) start the ARQ worker as a background task in the same process,
+using the same `WorkerSettings`, instead of it running as its own container.
+docker-compose doesn't set it, so local dev keeps the separate `worker` service
+(`docker compose up -d`); Render's blueprint does set it, for the reason below.
+
 ### Deploying to Render (backend) + Vercel (frontend)
 
-The backend — API, ARQ worker, Postgres, and Redis — is defined as a single
+The backend — API (with the ARQ worker running in-process inside it), Postgres,
+and Redis — is defined as a single
 [Render Blueprint](https://render.com/docs/infrastructure-as-code) in `render.yaml`
 at the repo root, targeting Render's free tier throughout. Every credential below is
 entered directly in the Render or Vercel dashboard, never pasted into a chat.
 
-> **Free tier means slow first requests.** Render's free web services and workers
-> spin down after 15 minutes with no traffic. The next request wakes the container
-> back up, which takes roughly **30-60 seconds** before it responds — expect that
-> delay on the first hit after any idle period, not just after a deploy. Free
-> Postgres also expires 30 days after creation (14-day grace period to upgrade or
-> export before data is deleted), and the free Redis/Key Value instance is capped at
-> 25MB and doesn't persist data across restarts — both fine for a demo, not for
-> anything you need to keep.
+> **Free tier means slow first requests.** Render's free web services spin down
+> after 15 minutes with no traffic. The next request wakes the container back up,
+> which takes roughly **30-60 seconds** before it responds — expect that delay on
+> the first hit after any idle period, not just after a deploy. Free Postgres also
+> expires 30 days after creation (14-day grace period to upgrade or export before
+> data is deleted), and the free Redis/Key Value instance is capped at 25MB and
+> doesn't persist data across restarts — both fine for a demo, not for anything you
+> need to keep.
+
+> **No separate worker service.** Render's free tier only has Free instances for
+> web services, Postgres, and Key Value — background workers need a paid plan. So
+> unlike a typical Railway/Fly/etc. setup, there's no `course-platform-worker`
+> service in `render.yaml`; the single `course-platform-api` service handles both
+> HTTP and job processing (`RUN_WORKER_IN_PROCESS=true`, see above). If you ever
+> move this off the free tier, adding a real worker service back is a `render.yaml`
+> change, not a code change — just drop `RUN_WORKER_IN_PROCESS` and add the service.
 
 1. **Render, sync the Blueprint:** Dashboard → **New → Blueprint**, pick this GitHub
-   repo. Render reads `render.yaml` and proposes three services: the
-   `course-platform-api` web service and `course-platform-worker` background worker
-   (both built from `backend/Dockerfile` via the blueprint's `rootDir: backend`), a
-   free `course-platform-postgres` database, and a free `course-platform-redis`
-   Key Value instance. `DATABASE_URL` and `REDIS_URL` are wired automatically on both
-   services via the blueprint's `fromDatabase`/`fromService` references.
-2. **Secrets:** the blueprint declares `JWT_SECRET_KEY`, `OPENAI_API_KEY`,
-   `PINECONE_API_KEY`, and `PINECONE_INDEX_NAME` as `sync: false` on both services, so
-   Render prompts for each during the sync — paste real values (generate
-   `JWT_SECRET_KEY` yourself). `CORS_ORIGINS` is also `sync: false` on the API
-   service; leave it as a placeholder for now, you'll set it for real in step 4.
-   `PINECONE_ENVIRONMENT` isn't used by this app. Don't set `PORT`; Render injects it,
-   and `app/config.py` already normalizes Render's plain `postgres://` connection
-   string to the asyncpg driver the same way it does for other providers.
+   repo. Render reads `render.yaml` and proposes three resources: the
+   `course-platform-api` web service (built from `backend/Dockerfile` via the
+   blueprint's `rootDir: backend`), a free `course-platform-postgres` database, and a
+   free `course-platform-redis` Key Value instance. `DATABASE_URL` and `REDIS_URL`
+   are wired onto the API service automatically via the blueprint's
+   `fromDatabase`/`fromService` references.
+2. **Secrets:** the blueprint declares `OPENAI_API_KEY`, `PINECONE_API_KEY`, and
+   `PINECONE_INDEX_NAME` as `sync: false`, so Render prompts for each during the
+   sync — paste real values. `JWT_SECRET_KEY` is *not* prompted for: it uses
+   `generateValue: true`, so Render generates it once at first sync and reuses that
+   same value on every redeploy — don't click the dashboard's own "Generate" button
+   for it afterward, that would replace it with a different value and invalidate
+   every token issued so far. `CORS_ORIGINS` is also `sync: false`; leave it as a
+   placeholder for now, you'll set it for real in step 4. `PINECONE_ENVIRONMENT`
+   isn't used by this app. Don't set `PORT`; Render injects it, and `app/config.py`
+   already normalizes Render's plain `postgres://` connection string to the asyncpg
+   driver the same way it does for other providers.
 3. **Public URL:** after the sync finishes, the API service's dashboard page shows
    its `onrender.com` URL under **Settings**.
 4. **Vercel:** import this repo, set **Root Directory** to `frontend` (Vite preset
    auto-detects), add `VITE_API_URL` = the Render URL from step 3, deploy.
 5. **Close the loop:** back on Render, set the API service's `CORS_ORIGINS` env var to
    the real Vercel URL from step 4 (comma-separated if you add more later, e.g. a
-   custom domain or preview deployments) — this triggers a redeploy of the API
-   service only, the worker is untouched.
+   custom domain or preview deployments).
 
-`WEB_CONCURRENCY` is pinned to `1` in `render.yaml` for the API service: free web
-services get 512MB RAM / 0.1 CPU, and a second uvicorn worker process (each with its
-own OpenAI/Pinecone clients) risks OOM at that ceiling. Migrations still run on every
-API deploy — `backend/Dockerfile`'s `CMD` runs `alembic upgrade head` before starting
-uvicorn, and Render always runs the image's `CMD`/start command fresh on deploy, so
-there's no separate release-phase step to configure. The worker service overrides
-that same image's command (via the blueprint's `dockerCommand`) to run `arq` instead,
-and never runs migrations itself — safe to scale to multiple worker instances later
-without racing migrations against each other.
+`WEB_CONCURRENCY` is pinned to `1` in `render.yaml`: free web services get 512MB RAM
+/ 0.1 CPU, and a second uvicorn worker process (each with its own OpenAI/Pinecone
+clients, and now its own in-process ARQ worker) risks OOM at that ceiling — and would
+mean two ARQ workers competing for the same jobs instead of one. Migrations still run
+on every deploy — `backend/Dockerfile`'s `CMD` runs `alembic upgrade head` before
+starting uvicorn, and Render always runs the image's `CMD`/start command fresh on
+deploy, so there's no separate release-phase step to configure.
 
 `vercel.json` already adds the SPA rewrite Vercel needs so client-side routes like
 `/dashboard` don't 404 on a hard refresh.

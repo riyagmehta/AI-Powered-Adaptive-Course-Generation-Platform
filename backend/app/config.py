@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
+    # Deploy topology — when true, the FastAPI app's lifespan (app/main.py)
+    # runs the ARQ worker in-process instead of it being a separate
+    # container/service. Render's free tier has no background-worker service
+    # type, so the render.yaml API service sets this; docker-compose leaves
+    # it false and keeps running the worker as its own container.
+    run_worker_in_process: bool = False
+
     # CORS — comma-separated list of allowed frontend origins.
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
