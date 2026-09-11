@@ -80,4 +80,21 @@ async def create_doubt(
             logger.exception("Doubt resolution failed for module %s", module.id)
             yield _sse("error", {"detail": str(exc)})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            # Starlette's StreamingResponse sends each yielded chunk as its
+            # own ASGI message immediately (no app-level buffering) — but
+            # without these, Render's proxy (like most nginx-style reverse
+            # proxies fronting a backend) buffers the whole response and
+            # releases it in one shot instead of forwarding chunks as they
+            # arrive, which is what "streaming works locally, arrives all at
+            # once in production" actually means: it's the proxy hop, not
+            # this app. no-transform additionally stops a proxy from
+            # gzipping the stream, which would force it to buffer to do so.
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
