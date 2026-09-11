@@ -125,7 +125,7 @@ which the frontend surfaces as a toast rather than a page-level error.
 
 ## Production deployment
 
-### Backend (Docker)
+### Backend (Docker, any host)
 
 ```bash
 cd backend
@@ -133,20 +133,103 @@ docker build -t course-platform-backend .
 docker run --env-file .env -p 8000:8000 course-platform-backend
 ```
 
-The image runs `alembic upgrade head` before starting `uvicorn` with 4 workers.
-Configuration comes entirely from real process environment variables (not a baked-in
-`.env` file), so pass them with `--env-file` / a compose `environment:` block and point
-`DATABASE_URL`/`REDIS_URL` at your production Postgres and Redis instances.
+The image runs `alembic upgrade head` before starting `uvicorn`. Configuration comes
+entirely from real process environment variables (not a baked-in `.env` file), so pass
+them with `--env-file` / a compose `environment:` block. It respects `$PORT` (falls
+back to `8000`) and `$WEB_CONCURRENCY` (worker count, default `2`) for platforms that
+assign these dynamically.
 
-### Frontend
+### Deploying to Railway (backend) + Vercel (frontend)
 
-```bash
-cd frontend
-npm run build
+This is a step-by-step walkthrough for the specific combination this project is set up
+for. Nothing here asks you to paste a secret into a chat — every credential is set
+directly in the Railway or Vercel dashboard.
+
+#### 1. Railway: create the project and databases
+
+1. Go to [railway.app](https://railway.app), sign in with GitHub, and authorize it to
+   access this repository.
+2. **New Project → Deploy from GitHub repo** → select this repo. Railway creates one
+   service pointed at the repo root — you'll repoint it at `backend/` next.
+3. On that service, open **Settings → Source** and set **Root Directory** to `backend`.
+   Railway will detect `backend/Dockerfile` and `backend/railway.json` (already in this
+   repo) and use those for the build and healthcheck — you shouldn't need to touch
+   build settings manually.
+4. In the project canvas, click **+ New → Database → Add PostgreSQL**.
+5. Click **+ New → Database → Add Redis**.
+
+#### 2. Railway: configure the backend service's environment variables
+
+Open the backend service → **Variables** tab and add each of these. For `DATABASE_URL`
+and `REDIS_URL`, use Railway's variable reference picker (type `${{` and it will
+autocomplete the other services' variables) instead of copy-pasting values — that way
+they stay in sync if the database ever moves.
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | reference → `${{Postgres.DATABASE_URL}}` |
+| `REDIS_URL` | reference → `${{Redis.REDIS_URL}}` |
+| `JWT_SECRET_KEY` | a real secret you generate yourself (e.g. run `openssl rand -hex 32` in your own terminal and paste **the output** here — not into this chat) |
+| `OPENAI_API_KEY` | your OpenAI key, set directly in this dashboard |
+| `PINECONE_API_KEY` | your Pinecone key, set directly in this dashboard |
+| `PINECONE_INDEX_NAME` | your Pinecone index name |
+| `CORS_ORIGINS` | placeholder for now, e.g. `https://placeholder.vercel.app` — you'll update this in step 4 once the real Vercel URL exists |
+
+Notes:
+- `DATABASE_URL` from Railway's Postgres plugin comes as a plain `postgresql://` URL;
+  `app/config.py` now normalizes that to the `postgresql+asyncpg://` driver URL this
+  app needs, so the reference just works without editing it.
+- `PINECONE_ENVIRONMENT` isn't used by the pinecone-client version this app pins — you
+  can leave it unset.
+- Don't set `PORT` — Railway injects it automatically and the Dockerfile already reads it.
+- Everything else (`JWT_ALGORITHM`, `OPENAI_CHAT_MODEL`, `WEB_CONCURRENCY`, etc.) has a
+  sane default; only add it if you want to override it.
+
+Railway will redeploy automatically once the required variables are in place. Watch the
+**Deployments** tab for the build/deploy logs — you should see the Alembic migration
+output followed by `Uvicorn running on http://0.0.0.0:$PORT`.
+
+#### 3. Railway: get a public URL for the backend
+
+Open **Settings → Networking** and click **Generate Domain** if one wasn't created
+automatically. Copy the resulting `https://<something>.up.railway.app` URL — you'll
+need it for the frontend and to test the API (e.g. `curl https://<that-url>/health`).
+
+#### 4. Vercel: deploy the frontend
+
+1. Go to [vercel.com](https://vercel.com), sign in with GitHub, and authorize access to
+   this repository.
+2. **Add New → Project**, import this repo.
+3. In the import screen, click **Edit** next to **Root Directory** and set it to
+   `frontend`. Vercel should auto-detect the **Vite** framework preset (build command
+   `npm run build`, output directory `dist`) — leave those as detected.
+4. Expand **Environment Variables** and add:
+   - `VITE_API_URL` = the Railway URL from step 3 (no trailing slash), e.g.
+     `https://your-service.up.railway.app`
+5. Click **Deploy**.
+6. Once it's live, copy the production URL Vercel gives you (`https://your-project.vercel.app`).
+
+`vercel.json` in the frontend already adds the SPA rewrite Vercel needs so that
+client-side routes like `/dashboard` or `/courses/12` don't 404 on a hard refresh —
+no action needed there.
+
+#### 5. Close the loop: point the backend's CORS at the real frontend URL
+
+Back in Railway → backend service → **Variables**, update `CORS_ORIGINS` to the exact
+Vercel URL from step 4 (comma-separate more than one, e.g. if you later add a custom
+domain):
+
+```
+CORS_ORIGINS=https://your-project.vercel.app
 ```
 
-Serve the resulting `dist/` from any static host (Vercel, Netlify, nginx, etc.), with
-`VITE_API_URL` set at build time to your deployed backend's URL.
+Save it — Railway redeploys the backend automatically. Once that finishes, open the
+Vercel URL and run through the flow (register → onboarding → a course) to confirm the
+frontend can actually reach the backend.
+
+If you also want Vercel's per-branch preview deployments to work against this backend,
+add their origins to `CORS_ORIGINS` too (comma-separated) as you create them — preview
+URLs aren't known ahead of time, so there's no single wildcard to set once and forget.
 
 ## Screenshots
 

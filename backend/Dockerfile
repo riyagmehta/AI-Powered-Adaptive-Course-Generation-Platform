@@ -34,4 +34,9 @@ EXPOSE 8000
 # Config is loaded from real process environment variables (see app/config.py) —
 # pass them with `docker run --env-file .env` / a compose `environment:` block,
 # not by baking a .env file into the image.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"]
+#
+# $PORT is respected (falling back to 8000) because platforms like Railway
+# assign it dynamically rather than letting you fix it. $WEB_CONCURRENCY
+# controls the uvicorn worker count (default 2) — raise it if your instance
+# has the CPU/RAM to spare.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2}"]
